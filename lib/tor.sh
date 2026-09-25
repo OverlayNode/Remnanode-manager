@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-tor_install() { rn_require_root; apt-get update; apt-get install -y tor; systemctl enable --now tor; rn_info "Tor installed. Routing was not enabled."; }
+tor_install() { rn_require_root; rn_apt_get update; rn_apt_get install -y tor; systemctl enable --now tor; rn_info "Tor installed. Routing was not enabled."; }
 tor_create_outbound() {
   local tag="${1:-tor-main}" file
   file="$(snippet_file "$tag")"

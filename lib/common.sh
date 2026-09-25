@@ -49,6 +49,15 @@ rn_require_command() {
   command -v "$1" >/dev/null 2>&1 || rn_die "Required command is missing: $1"
 }
 
+rn_apt_get() {
+  local timeout="${APT_LOCK_TIMEOUT:-600}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || rn_die "APT_LOCK_TIMEOUT must be a number of seconds"
+  if command -v fuser >/dev/null 2>&1 && fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+    rn_info "APT/dpkg is busy; waiting up to ${timeout} seconds for the package manager lock."
+  fi
+  apt-get -o "DPkg::Lock::Timeout=${timeout}" "$@"
+}
+
 rn_confirm() {
   local prompt="$1" default="${2:-no}" answer
   [[ "${RN_ASSUME_YES:-0}" == 1 ]] && return 0

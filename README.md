@@ -352,3 +352,22 @@ shellcheck install.sh remnanode lib/*.sh tests/*.sh
 - Не включайте system-wide WARP на удалённом сервере без out-of-band console.
 - Проверяйте `remnanode doctor` после изменений DNS, TLS, firewall или routing.
 - Репозиторий не заменяет firewall/security group VPS-провайдера.
+
+## Решение проблем
+
+### APT/dpkg занят unattended-upgrades
+
+На Ubuntu сразу после запуска VPS автоматическое обновление может удерживать `/var/lib/dpkg/lock-frontend`. Удалять lock-файл вручную нельзя: это может повредить состояние package manager.
+
+Installer автоматически ждёт освобождения APT/dpkg до 600 секунд. Таймаут можно изменить:
+
+```bash
+APT_LOCK_TIMEOUT=1200 bash <(curl -Ls https://raw.githubusercontent.com/OverlayNode/Remnanode-manager/main/install.sh) install-manager
+```
+
+Если обновление длится дольше таймаута, дождитесь его завершения и безопасно запустите ту же команду повторно. Проверить владельца lock можно так:
+
+```bash
+ps -fp "$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null)"
+systemctl status unattended-upgrades --no-pager
+```

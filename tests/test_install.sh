@@ -51,12 +51,26 @@ load_state
 [[ "$INSTALL_MODE" == "basic" ]]
 
 mkdir -p "${TEST_DIR}/bin"
+APT_CAPTURE="${TEST_DIR}/apt.args"
+export APT_CAPTURE
+cat > "${TEST_DIR}/bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$APT_CAPTURE"
+EOF
+cat > "${TEST_DIR}/bin/fuser" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
 cat > "${TEST_DIR}/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "${TEST_DIR}/bin/docker"
+chmod +x "${TEST_DIR}/bin/apt-get" "${TEST_DIR}/bin/fuser" "${TEST_DIR}/bin/docker"
 PATH="${TEST_DIR}/bin:${PATH}"
+
+APT_LOCK_TIMEOUT=42
+apt_get_wait install -y jq
+grep -Fq -- '-o DPkg::Lock::Timeout=42 install -y jq' "$APT_CAPTURE"
 
 BASE_DIR="${TEST_DIR}/node"
 mkdir -p "$BASE_DIR"

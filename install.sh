@@ -19,6 +19,7 @@ set -Eeuo pipefail
 
 SCRIPT_VERSION="3.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-600}"
 
 REMNAWAVE_IMAGE="${REMNAWAVE_IMAGE:-remnawave/node:latest}"
 NGINX_IMAGE="${NGINX_IMAGE:-nginx:alpine}"
@@ -307,12 +308,29 @@ ensure_base_dirs() {
   chmod 700 "${BASE_DIR}/ssl"
 }
 
+apt_lock_is_held() {
+  command -v fuser >/dev/null 2>&1 || return 1
+  fuser \
+    /var/lib/dpkg/lock-frontend \
+    /var/lib/dpkg/lock \
+    /var/cache/apt/archives/lock \
+    /var/lib/apt/lists/lock >/dev/null 2>&1
+}
+
+apt_get_wait() {
+  [[ "$APT_LOCK_TIMEOUT" =~ ^[0-9]+$ ]] || die "APT_LOCK_TIMEOUT должен быть числом секунд."
+  if apt_lock_is_held; then
+    info "APT/dpkg занят другим процессом (например, unattended-upgrades). Жду до ${APT_LOCK_TIMEOUT} секунд..."
+  fi
+  apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT}" "$@"
+}
+
 install_base_packages() {
   info "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
 
-  apt-get update -y
-  apt-get install -y \
+  apt_get_wait update -y
+  apt_get_wait install -y \
     ca-certificates \
     curl \
     gnupg \
@@ -369,8 +387,8 @@ EOF
 
   chmod a+r /etc/apt/keyrings/docker.asc
 
-  apt-get update -y
-  apt-get install -y \
+  apt_get_wait update -y
+  apt_get_wait install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
