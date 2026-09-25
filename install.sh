@@ -17,7 +17,8 @@ set -Eeuo pipefail
 #
 # Run as root.
 
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="3.0.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 REMNAWAVE_IMAGE="${REMNAWAVE_IMAGE:-remnawave/node:latest}"
 NGINX_IMAGE="${NGINX_IMAGE:-nginx:alpine}"
@@ -71,6 +72,8 @@ REALITY_PRIVATE_KEY=""
 REALITY_PUBLIC_KEY=""
 RAW_SHORT_ID=""
 XHTTP_SHORT_ID=""
+RAW_SHORT_IDS_JSON=""
+XHTTP_SHORT_IDS_JSON=""
 
 log() {
   printf '%b\n' "$*" | tee -a "$INSTALL_LOG"
@@ -278,6 +281,8 @@ save_reality() {
     printf 'REALITY_PUBLIC_KEY=%q\n' "$REALITY_PUBLIC_KEY"
     printf 'RAW_SHORT_ID=%q\n' "$RAW_SHORT_ID"
     printf 'XHTTP_SHORT_ID=%q\n' "$XHTTP_SHORT_ID"
+    printf 'RAW_SHORT_IDS_JSON=%q\n' "$RAW_SHORT_IDS_JSON"
+    printf 'XHTTP_SHORT_IDS_JSON=%q\n' "$XHTTP_SHORT_IDS_JSON"
   } > "$tmp_file"
   chmod 600 "$tmp_file"
   mv -f "$tmp_file" "$REALITY_FILE"
@@ -317,6 +322,7 @@ install_base_packages() {
     cron \
     iproute2 \
     jq \
+    tmux \
     python3-minimal \
     python3-yaml
 
@@ -1506,12 +1512,73 @@ EOF
   ok "UDP buffers tuned for Hysteria2."
 }
 
+validate_short_id() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9a-f]+$ ]] \
+    && ((${#value} >= 2 && ${#value} <= 16 && ${#value} % 2 == 0))
+}
+
+validate_shortids_json() {
+  local json="$1" value count unique
+  jq -e 'type == "array" and length >= 1 and length <= 32' <<<"$json" >/dev/null || return 1
+  while IFS= read -r value; do
+    value="${value%$'\r'}"
+    validate_short_id "$value" || return 1
+  done < <(jq -r '.[]' <<<"$json")
+  count="$(jq 'length' <<<"$json")"
+  unique="$(jq 'unique | length' <<<"$json")"
+  [[ "$count" == "$unique" ]]
+}
+
+secure_random_int() {
+  local minimum="$1" maximum="$2" value span
+  value=$((16#$(openssl rand -hex 4)))
+  span=$((maximum - minimum + 1))
+  printf '%d' "$((minimum + value % span))"
+}
+
+generate_shortids_json() {
+  local count="${1:-}" length candidate result='[]'
+  [[ -n "$count" ]] || count="$(secure_random_int 3 12)"
+  [[ "$count" =~ ^[0-9]+$ ]] && ((count >= 1 && count <= 32)) \
+    || die "Количество Reality Short IDs должно быть от 1 до 32."
+  while (($(jq 'length' <<<"$result") < count)); do
+    length=$((2 * $(secure_random_int 1 8)))
+    candidate="$(openssl rand -hex $((length / 2)))"
+    result="$(jq -c --arg id "$candidate" 'if index($id) then . else . + [$id] end' <<<"$result")"
+  done
+  validate_shortids_json "$result" || die "Сгенерированные Reality Short IDs не прошли проверку."
+  printf '%s' "$result"
+}
+
+ensure_shortids_json() {
+  local current="${1:-}" legacy="${2:-}" target result
+  if [[ -n "$current" ]] && validate_shortids_json "$current"; then
+    printf '%s' "$current"
+    return 0
+  fi
+  target="$(secure_random_int 3 12)"
+  result='[]'
+  if [[ -n "$legacy" ]] && validate_short_id "$legacy"; then
+    result="$(jq -cn --arg id "$legacy" '[$id]')"
+  fi
+  while (($(jq 'length' <<<"$result") < target)); do
+    local length candidate
+    length=$((2 * $(secure_random_int 1 8)))
+    candidate="$(openssl rand -hex $((length / 2)))"
+    result="$(jq -c --arg id "$candidate" 'if index($id) then . else . + [$id] end' <<<"$result")"
+  done
+  printf '%s' "$result"
+}
+
 generate_reality_material() {
   load_reality
 
   if [[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]]; then
-    [[ -n "$RAW_SHORT_ID" ]] || RAW_SHORT_ID="$(openssl rand -hex 8)"
-    [[ -n "$XHTTP_SHORT_ID" ]] || XHTTP_SHORT_ID="$(openssl rand -hex 8)"
+    RAW_SHORT_IDS_JSON="$(ensure_shortids_json "${RAW_SHORT_IDS_JSON:-}" "${RAW_SHORT_ID:-}")"
+    XHTTP_SHORT_IDS_JSON="$(ensure_shortids_json "${XHTTP_SHORT_IDS_JSON:-}" "${XHTTP_SHORT_ID:-}")"
+    RAW_SHORT_ID="$(jq -r '.[0]' <<<"$RAW_SHORT_IDS_JSON")"
+    XHTTP_SHORT_ID="$(jq -r '.[0]' <<<"$XHTTP_SHORT_IDS_JSON")"
     save_reality
     return 0
   fi
@@ -1533,8 +1600,10 @@ generate_reality_material() {
   [[ "$REALITY_PUBLIC_KEY" =~ ^[A-Za-z0-9_=-]{32,128}$ ]] \
     || die "Xray вернул Reality Public Key в неожиданном формате."
 
-  RAW_SHORT_ID="$(openssl rand -hex 8)"
-  XHTTP_SHORT_ID="$(openssl rand -hex 8)"
+  RAW_SHORT_IDS_JSON="$(generate_shortids_json)"
+  XHTTP_SHORT_IDS_JSON="$(generate_shortids_json)"
+  RAW_SHORT_ID="$(jq -r '.[0]' <<<"$RAW_SHORT_IDS_JSON")"
+  XHTTP_SHORT_ID="$(jq -r '.[0]' <<<"$XHTTP_SHORT_IDS_JSON")"
 
   save_reality
   ok "Reality keypair и Short IDs сгенерированы."
@@ -1554,6 +1623,8 @@ rotate_reality_keys() {
   REALITY_PUBLIC_KEY=""
   RAW_SHORT_ID=""
   XHTTP_SHORT_ID=""
+  RAW_SHORT_IDS_JSON=""
+  XHTTP_SHORT_IDS_JSON=""
 
   generate_reality_material
   generate_xray_profile
@@ -1608,7 +1679,7 @@ generate_xray_profile() {
       "xver": 1,
       "target": "/dev/shm/nginx.sock",
       "spiderX": "",
-      "shortIds": ["${RAW_SHORT_ID}"],
+      "shortIds": ${RAW_SHORT_IDS_JSON},
       "privateKey": "${REALITY_PRIVATE_KEY}",
       "serverNames": ["${DOMAIN}"],
       "minClientVer": "0.0.0"
@@ -1646,7 +1717,7 @@ EOF
       "xver": 1,
       "target": "/dev/shm/nginx.sock",
       "spiderX": "",
-      "shortIds": ["${XHTTP_SHORT_ID}"],
+      "shortIds": ${XHTTP_SHORT_IDS_JSON},
       "privateKey": "${REALITY_PRIVATE_KEY}",
       "serverNames": ["${DOMAIN}"],
       "minClientVer": "0.0.0"
@@ -1758,7 +1829,7 @@ EOF
       echo "Tag: VLESS_RAW_REALITY"
       echo "TCP port: ${RAW_PORT}"
       echo "SNI: ${DOMAIN}"
-      echo "Short ID: ${RAW_SHORT_ID}"
+      echo "Short IDs: $(jq -c . <<<"$RAW_SHORT_IDS_JSON")"
       echo "Public Key / Password: ${REALITY_PUBLIC_KEY}"
       echo "Target: /dev/shm/nginx.sock"
       echo
@@ -1769,7 +1840,7 @@ EOF
       echo "Tag: VLESS_XHTTP_REALITY"
       echo "TCP port: ${XHTTP_PORT}"
       echo "SNI: ${DOMAIN}"
-      echo "Short ID: ${XHTTP_SHORT_ID}"
+      echo "Short IDs: $(jq -c . <<<"$XHTTP_SHORT_IDS_JSON")"
       echo "Public Key / Password: ${REALITY_PUBLIC_KEY}"
       echo "Path: ${XHTTP_PATH}"
       echo "Mode: ${XHTTP_MODE}"
@@ -1839,8 +1910,7 @@ verify_basic() {
   manager_compose ps
 
   local state=""
-  local attempt
-  for attempt in {1..15}; do
+  for _ in {1..15}; do
     state="$(docker inspect remnanode --format '{{.State.Status}}' 2>/dev/null || true)"
     [[ "$state" == "running" ]] && break
     sleep 2
@@ -2399,14 +2469,53 @@ show_menu() {
   echo "10. Сгенерировать новую Reality keypair"
   echo "11. Показать структуру файлов"
   echo "12. Удалить установленный стек / Selfsteal"
+  echo "13. Установить / обновить модульный CLI remnanode"
   echo
   echo "0. Выход"
   echo
 }
 
+install_manager_cli() {
+  local target="/opt/remnanode-manager" entry="/usr/local/bin/remnanode" source_dir="$SCRIPT_DIR" temp_dir=""
+  if [[ ! -f "${source_dir}/remnanode" || ! -d "${source_dir}/lib" ]]; then
+    temp_dir="$(mktemp -d /tmp/remnanode-manager-bootstrap.XXXXXX)"
+    info "Загружаю полный архив RemnaNode Manager..."
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://codeload.github.com/OverlayNode/Remnanode-manager/tar.gz/refs/heads/main" \
+      -o "${temp_dir}/manager.tar.gz" \
+      || { rm -rf -- "$temp_dir"; die "Не удалось скачать архив manager."; }
+    tar -xzf "${temp_dir}/manager.tar.gz" -C "$temp_dir"
+    source_dir="${temp_dir}/Remnanode-manager-main"
+    [[ -f "${source_dir}/remnanode" && -f "${source_dir}/VERSION" && -d "${source_dir}/lib" ]] \
+      || { rm -rf -- "$temp_dir"; die "Загруженный архив не содержит ожидаемую структуру."; }
+    bash -n "${source_dir}/install.sh" "${source_dir}/remnanode" "${source_dir}"/lib/*.sh \
+      || { rm -rf -- "$temp_dir"; die "Загруженные shell-файлы не прошли syntax validation."; }
+  fi
+  install_base_packages
+  install -d -m 755 "$target" "$target/lib" "$target/data" "$target/templates" \
+    "$target/templates/snippets" "$target/templates/selfsteal"
+  [[ -f "$target/VERSION" ]] && backup_file "$target/VERSION"
+  install -m 755 "${source_dir}/remnanode" "$target/remnanode"
+  install -m 755 "${source_dir}/install.sh" "$target/install.sh"
+  install -m 644 "${source_dir}/VERSION" "$target/VERSION"
+  install -m 644 "${source_dir}"/lib/*.sh "$target/lib/"
+  install -m 644 "${source_dir}"/data/*.json "$target/data/"
+  install -m 644 "${source_dir}"/templates/snippets/*.json "$target/templates/snippets/"
+  install -m 644 "${source_dir}"/templates/selfsteal/* "$target/templates/selfsteal/"
+  ln -sfn "$target/remnanode" "$entry"
+  [[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"
+  ok "Manager установлен: ${entry}"
+  info "Запуск: remnanode status | remnanode menu"
+}
+
 main() {
   require_root
   detect_os
+
+  if [[ "${1:-}" == "install-manager" ]]; then
+    install_manager_cli
+    return 0
+  fi
 
   touch "$INSTALL_LOG"
   chmod 600 "$INSTALL_LOG"
@@ -2463,6 +2572,10 @@ main() {
         ;;
       12)
         remove_node
+        pause
+        ;;
+      13)
+        install_manager_cli
         pause
         ;;
       0)

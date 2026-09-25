@@ -1,0 +1,1 @@
+{"id":"freedom-direct","name":"DIRECT outbound","type":"outbound","version":1,"enabled":true,"managedBy":"remnanode-manager","requires":[],"config":{"outbounds":[{"tag":"DIRECT","protocol":"freedom"}]}}

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" rx="22" fill="#07111f"/>
+  <rect x="1" y="1" width="1198" height="718" rx="21" fill="none" stroke="#17304b" stroke-width="2"/>
+  <circle cx="32" cy="30" r="7" fill="#ff5f57"/><circle cx="56" cy="30" r="7" fill="#febc2e"/><circle cx="80" cy="30" r="7" fill="#28c840"/>
+  <text x="600" y="37" fill="#7991aa" text-anchor="middle" font-family="ui-monospace,Consolas,monospace" font-size="16">remnanode — dashboard</text>
+  <g font-family="ui-monospace,Consolas,monospace" font-size="20" fill="#dce9f7">
+    <text x="42" y="88" fill="#19d3ff" font-size="27" font-weight="700">REMNANODE MANAGER <tspan fill="#7991aa" font-size="18">v3.0.0</tspan></text>
+    <text x="42" y="132">Node  <tspan fill="#30e67a">ONLINE</tspan>      3.4.0          Xray  <tspan fill="#30e67a">RUNNING</tspan>  Xray 25.8.3</text>
+    <text x="42" y="170">CPU   <tspan fill="#30e67a">8%</tspan>          RAM  624 MiB / 2 GiB       Disk  18%</text>
+    <text x="42" y="208">Load  0.08 0.06 0.03        Uptime  14 days, 8 hours</text>
+    <text x="42" y="246">IPv4  185.•••.•••.24</text>
+    <text x="42" y="280">IPv6  2a01:••••:••••::24</text>
+    <text x="42" y="334" fill="#19d3ff" font-weight="700">SYSTEM &amp; MONITORING</text>
+    <text x="42" y="370"> 1. Server status              4. Ports &amp; connections</text>
+    <text x="42" y="404"> 2. Resource monitoring        5. Logs</text>
+    <text x="42" y="438"> 3. Network                    6. Diagnostics</text>
+    <text x="610" y="334" fill="#19d3ff" font-weight="700">NODE</text>
+    <text x="610" y="370"> 7. RemnaNode management</text>
+    <text x="610" y="404"> 8. Xray management</text>
+    <text x="610" y="438"> 9. Reality / Inbounds</text>
+    <text x="42" y="500" fill="#19d3ff" font-weight="700">NETWORK &amp; ROUTING</text>
+    <text x="42" y="536">14. WARP       15. Tor       16. Datasets</text>
+    <text x="42" y="570">17. Routing presets           18. Firewall</text>
+    <text x="610" y="500" fill="#19d3ff" font-weight="700">ADMINISTRATION</text>
+    <text x="610" y="536">20. Updates     21. Backup &amp; Restore</text>
+    <text x="610" y="570">22. Scheduled tasks</text>
+    <text x="42" y="646" fill="#7991aa">R. Refresh</text><text x="1040" y="646" fill="#7991aa">Q. Exit</text>
+    <text x="42" y="686" fill="#30e67a">›</text><rect x="66" y="666" width="12" height="24" fill="#30e67a" opacity=".8"/>
+  </g>
+</svg>

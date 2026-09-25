@@ -1,0 +1,1 @@
+{"id":"torrent-block","name":"Block BitTorrent","type":"routing","version":1,"enabled":true,"managedBy":"remnanode-manager","requires":["blackhole"],"config":{"routing":{"rules":[{"type":"field","protocol":["bittorrent"],"outboundTag":"BLOCK"}]}}}

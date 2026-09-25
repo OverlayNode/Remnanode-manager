@@ -1,0 +1,1 @@
+{"id":"cloudflare-dns","name":"Cloudflare DNS","type":"dns","version":1,"enabled":true,"managedBy":"remnanode-manager","requires":[],"config":{"dns":{"servers":["1.1.1.1","1.0.0.1"]}}}

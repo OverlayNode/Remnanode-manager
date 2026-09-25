@@ -1,0 +1,1 @@
+{"id":"blackhole","name":"BLOCK outbound","type":"outbound","version":1,"enabled":true,"managedBy":"remnanode-manager","requires":[],"config":{"outbounds":[{"tag":"BLOCK","protocol":"blackhole"}]}}

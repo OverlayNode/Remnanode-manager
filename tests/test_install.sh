@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Variables below are consumed by functions sourced from install.sh.
+# shellcheck disable=SC2034
 set -Eeuo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,7 +47,7 @@ INSTALL_MODE=basic
 EOF
 
 load_state
-[[ "$SCRIPT_VERSION" == "2.3.0" ]]
+[[ "$SCRIPT_VERSION" == "3.0.0" ]]
 [[ "$INSTALL_MODE" == "basic" ]]
 
 mkdir -p "${TEST_DIR}/bin"
@@ -72,5 +74,14 @@ write_site_files node.example.com Example
 [[ ! -e "${BASE_DIR}/html/app.js" ]]
 assert_fail grep -qi 'type="password"' "${BASE_DIR}/html/index.html"
 assert_fail grep -qi '<form' "${BASE_DIR}/html/index.html"
+
+ids="$(generate_shortids_json)"
+count="$(jq length <<<"$ids")"
+((count >= 3 && count <= 12))
+[[ "$(jq 'unique|length' <<<"$ids")" == "$count" ]]
+validate_shortids_json "$ids"
+
+migrated="$(ensure_shortids_json '' 'deadbeef')"
+jq -e 'index("deadbeef") != null and length >= 3 and length <= 12' <<<"$migrated" >/dev/null
 
 printf 'All tests passed.\n'
