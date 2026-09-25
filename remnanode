@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-RN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RN_ENTRYPOINT="${BASH_SOURCE[0]}"
+while [[ -h "$RN_ENTRYPOINT" ]]; do
+  RN_LINK_DIR="$(cd -P "$(dirname "$RN_ENTRYPOINT")" >/dev/null 2>&1 && pwd)"
+  RN_ENTRYPOINT="$(readlink "$RN_ENTRYPOINT")"
+  [[ "$RN_ENTRYPOINT" == /* ]] || RN_ENTRYPOINT="${RN_LINK_DIR}/${RN_ENTRYPOINT}"
+done
+RN_ROOT="$(cd -P "$(dirname "$RN_ENTRYPOINT")" >/dev/null 2>&1 && pwd)"
+unset RN_ENTRYPOINT RN_LINK_DIR
 export RN_ROOT
 
 for module in common ui system network docker backup reality snippets config node xray panel selfsteal ssl firewall logs diagnostics warp tor routing update session security; do

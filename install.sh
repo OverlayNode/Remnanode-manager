@@ -2494,7 +2494,7 @@ show_menu() {
 }
 
 install_manager_cli() {
-  local target="/opt/remnanode-manager" entry="/usr/local/bin/remnanode" source_dir="$SCRIPT_DIR" temp_dir=""
+  local target="/opt/remnanode-manager" entry="/usr/local/bin/remnanode" source_dir="$SCRIPT_DIR" temp_dir="" entry_tmp
   if [[ ! -f "${source_dir}/remnanode" || ! -d "${source_dir}/lib" ]]; then
     temp_dir="$(mktemp -d /tmp/remnanode-manager-bootstrap.XXXXXX)"
     info "Загружаю полный архив RemnaNode Manager..."
@@ -2520,7 +2520,12 @@ install_manager_cli() {
   install -m 644 "${source_dir}"/data/*.json "$target/data/"
   install -m 644 "${source_dir}"/templates/snippets/*.json "$target/templates/snippets/"
   install -m 644 "${source_dir}"/templates/selfsteal/* "$target/templates/selfsteal/"
-  ln -sfn "$target/remnanode" "$entry"
+  entry_tmp="$(mktemp /tmp/remnanode-entry.XXXXXX)"
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$target/remnanode" >"$entry_tmp"
+  chmod 755 "$entry_tmp"
+  rm -f -- "$entry"
+  install -m 755 "$entry_tmp" "$entry"
+  rm -f -- "$entry_tmp"
   [[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"
   ok "Manager установлен: ${entry}"
   info "Запуск: remnanode status | remnanode menu"

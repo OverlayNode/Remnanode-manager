@@ -91,7 +91,7 @@ Manager использует стандартные системные комп�
 
 ```text
 /opt/remnanode-manager/          код manager
-/usr/local/bin/remnanode         глобальная команда
+/usr/local/bin/remnanode         wrapper глобальной команды
 /opt/remnanode/                  Compose и конфигурация Node
 /opt/remnanode/manager-state/    snippets, WARP, datasets и состояние
 /opt/remnanode/generated/        profile.json, reality.json, routing.json
@@ -338,6 +338,7 @@ systemctl list-timers 'remnanode-*'
 bash -n install.sh remnanode lib/*.sh
 bash tests/test_install.sh
 bash tests/test_manager.sh
+bash tests/test_entrypoint.sh
 shellcheck install.sh remnanode lib/*.sh tests/*.sh
 ```
 
