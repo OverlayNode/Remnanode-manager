@@ -31,6 +31,12 @@ chmod +x /root/remnanode-manager.sh
 /root/remnanode-manager.sh
 ```
 
+Или запустить одной командой:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/OverlayNode/Remnanode-manager/main/install.sh)
+```
+
 ## Главное меню
 
 ```text
