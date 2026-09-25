@@ -17,17 +17,23 @@ set -Eeuo pipefail
 #
 # Run as root.
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.2.0"
+
+REMNAWAVE_IMAGE="${REMNAWAVE_IMAGE:-remnawave/node:latest}"
+NGINX_IMAGE="${NGINX_IMAGE:-nginx:alpine}"
 
 BASE_DIR="/opt/remnanode"
 STATE_FILE="${BASE_DIR}/installer.conf"
-ENV_FILE="${BASE_DIR}/.env"
 REALITY_FILE="${BASE_DIR}/reality.env"
+UFW_STATE_FILE="${BASE_DIR}/ufw.rules"
+NODE_COMPOSE_FILE="${BASE_DIR}/docker-compose.yml"
+SELFSTEAL_OVERRIDE_FILE="${BASE_DIR}/docker-compose.selfsteal.yml"
 PROFILE_DIR="${BASE_DIR}/profiles"
 PROFILE_FILE="${PROFILE_DIR}/xray-profile.json"
 PROFILE_INFO="${PROFILE_DIR}/profile-info.txt"
 
 NODE_PORT="2222"
+NODE_SERVICE_NAME="remnanode"
 ACME_HOME="/root/.acme.sh"
 ACME_BIN="${ACME_HOME}/acme.sh"
 RELOAD_HELPER="/usr/local/sbin/reload-nginx-selfsteal"
@@ -110,6 +116,20 @@ confirm() {
   esac
 }
 
+confirm_no_default() {
+  local prompt="${1:-Продолжить?}"
+  local answer
+  read -r -p "$prompt [y/N]: " answer
+  case "${answer:-N}" in
+    Y|y|YES|yes|Yes|Д|д) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_selfsteal_mode() {
+  [[ "$INSTALL_MODE" == "selfsteal" || "$INSTALL_MODE" == "selfsteal-existing" ]]
+}
+
 validate_domain() {
   local value="$1"
   [[ "$value" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
@@ -123,6 +143,55 @@ validate_email() {
 validate_port() {
   local value="$1"
   [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
+}
+
+validate_panel_network() {
+  local value="$1"
+
+  [[ -z "$value" ]] && return 0
+
+  if [[ "$value" == *.* ]]; then
+    local address="${value%/*}"
+    local prefix="32"
+    [[ "$value" == */* ]] && prefix="${value##*/}"
+    [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    [[ "$prefix" =~ ^[0-9]+$ ]] && ((prefix >= 0 && prefix <= 32)) || return 1
+
+    local octet
+    local -a octets=()
+    IFS=. read -r -a octets <<< "$address"
+    for octet in "${octets[@]}"; do
+      ((10#$octet >= 0 && 10#$octet <= 255)) || return 1
+    done
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    local status
+    if python3 - "$value" 2>/dev/null <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.ip_network(sys.argv[1], strict=False)
+except ValueError:
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    else
+      status=$?
+      # 126/127 means that a command alias exists but cannot be executed.
+      ((status == 126 || status == 127)) || return "$status"
+    fi
+  fi
+
+  # Conservative fallback for minimal systems before python3 is installed.
+  local prefix="128"
+  local address="${value%/*}"
+  [[ "$value" == */* ]] && prefix="${value##*/}"
+  [[ "$address" == *:* && "$address" =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  [[ "$prefix" =~ ^[0-9]+$ ]] && ((prefix >= 0 && prefix <= 128))
 }
 
 validate_service_name() {
@@ -140,7 +209,7 @@ backup_file() {
   local file="$1"
   if [[ -f "$file" ]]; then
     local stamp
-    stamp="$(date +%Y%m%d-%H%M%S)"
+    stamp="$(date +%Y%m%d-%H%M%S-%N)"
     cp -a "$file" "${file}.backup-${stamp}"
     info "Backup: ${file}.backup-${stamp}"
   fi
@@ -151,16 +220,21 @@ shell_quote() {
 }
 
 save_state() {
+  local old_umask tmp_file
+  old_umask="$(umask)"
   mkdir -p "$BASE_DIR"
   umask 077
+  tmp_file="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
   {
-    printf 'SCRIPT_VERSION=%q\n' "$SCRIPT_VERSION"
+    printf 'INSTALLED_CONFIG_VERSION=%q\n' "$SCRIPT_VERSION"
     printf 'INSTALL_MODE=%q\n' "$INSTALL_MODE"
     printf 'DOMAIN=%q\n' "$DOMAIN"
     printf 'SERVICE_NAME=%q\n' "$SERVICE_NAME"
     printf 'ACME_EMAIL=%q\n' "$ACME_EMAIL"
     printf 'PANEL_IP=%q\n' "$PANEL_IP"
     printf 'NODE_PORT=%q\n' "$NODE_PORT"
+    printf 'NODE_COMPOSE_FILE=%q\n' "$NODE_COMPOSE_FILE"
+    printf 'NODE_SERVICE_NAME=%q\n' "$NODE_SERVICE_NAME"
 
     printf 'RAW_ENABLED=%q\n' "$RAW_ENABLED"
     printf 'RAW_PORT=%q\n' "$RAW_PORT"
@@ -172,27 +246,37 @@ save_state() {
 
     printf 'HY2_ENABLED=%q\n' "$HY2_ENABLED"
     printf 'HY2_PORT=%q\n' "$HY2_PORT"
-  } > "$STATE_FILE"
+  } > "$tmp_file"
 
-  chmod 600 "$STATE_FILE"
+  chmod 600 "$tmp_file"
+  mv -f "$tmp_file" "$STATE_FILE"
+  umask "$old_umask"
 }
 
 load_state() {
+  local running_version="$SCRIPT_VERSION"
   if [[ -f "$STATE_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$STATE_FILE"
   fi
+  # Older state files stored SCRIPT_VERSION. The running script version wins.
+  SCRIPT_VERSION="$running_version"
 }
 
 save_reality() {
+  local old_umask tmp_file
+  old_umask="$(umask)"
   umask 077
+  tmp_file="$(mktemp "${REALITY_FILE}.tmp.XXXXXX")"
   {
     printf 'REALITY_PRIVATE_KEY=%q\n' "$REALITY_PRIVATE_KEY"
     printf 'REALITY_PUBLIC_KEY=%q\n' "$REALITY_PUBLIC_KEY"
     printf 'RAW_SHORT_ID=%q\n' "$RAW_SHORT_ID"
     printf 'XHTTP_SHORT_ID=%q\n' "$XHTTP_SHORT_ID"
-  } > "$REALITY_FILE"
-  chmod 600 "$REALITY_FILE"
+  } > "$tmp_file"
+  chmod 600 "$tmp_file"
+  mv -f "$tmp_file" "$REALITY_FILE"
+  umask "$old_umask"
 }
 
 load_reality() {
@@ -209,6 +293,7 @@ ensure_base_dirs() {
     "${BASE_DIR}/html" \
     "$PROFILE_DIR"
 
+  chmod 755 "$BASE_DIR" "${BASE_DIR}/html" "$PROFILE_DIR"
   chmod 700 "${BASE_DIR}/ssl"
 }
 
@@ -226,7 +311,8 @@ install_base_packages() {
     ufw \
     cron \
     iproute2 \
-    jq
+    jq \
+    python3-minimal
 
   systemctl enable --now cron >/dev/null 2>&1 || true
   ok "Базовые пакеты установлены."
@@ -290,24 +376,21 @@ prompt_secret_and_panel() {
   echo
   [[ -n "$SECRET_KEY" ]] || die "SECRET_KEY не может быть пустым."
 
-  if [[ "$SECRET_KEY" == *"'"* || "$SECRET_KEY" == *$'\n'* ]]; then
-    die "SECRET_KEY содержит неподдерживаемый символ."
-  fi
+  [[ "$SECRET_KEY" =~ ^[A-Za-z0-9._=-]+$ ]] \
+    || die "SECRET_KEY содержит неподдерживаемые символы."
+
+  prompt_panel_network
+}
+
+prompt_panel_network() {
 
   read -r -p "IP/CIDR сервера панели для ${NODE_PORT}/tcp (Enter = открыть всем): " PANEL_IP
+
+  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
 
   if [[ -z "$PANEL_IP" ]]; then
     warn "${NODE_PORT}/tcp будет открыт для всего интернета."
   fi
-}
-
-write_env() {
-  umask 077
-  cat > "$ENV_FILE" <<EOF
-NODE_PORT='${NODE_PORT}'
-SECRET_KEY='${SECRET_KEY}'
-EOF
-  chmod 600 "$ENV_FILE"
 }
 
 detect_ssh_port() {
@@ -324,23 +407,55 @@ detect_ssh_port() {
   printf '%s' "$ssh_port"
 }
 
-ufw_allow_if_missing() {
+remove_managed_ufw_rules() {
+  local -a rule_numbers=()
+  mapfile -t rule_numbers < <(
+    ufw status numbered 2>/dev/null \
+      | awk '/remnanode-manager/ {number=$1; gsub(/[^0-9]/, "", number); if (number != "") print number}' \
+      | sort -rn
+  )
+
+  local number
+  for number in "${rule_numbers[@]}"; do
+    ufw --force delete "$number" >/dev/null 2>&1 || true
+  done
+
+  rm -f "$UFW_STATE_FILE"
+}
+
+apply_managed_ufw_rule() {
   local rule="$1"
-  # shellcheck disable=SC2086
-  ufw $rule >/dev/null
+  local -a args=()
+  read -r -a args <<< "$rule"
+  ufw "${args[@]}" comment remnanode-manager >/dev/null
+}
+
+save_managed_ufw_rules() {
+  local tmp_file
+  tmp_file="$(mktemp "${UFW_STATE_FILE}.tmp.XXXXXX")"
+  printf '%s\n' "$@" > "$tmp_file"
+  chmod 600 "$tmp_file"
+  mv -f "$tmp_file" "$UFW_STATE_FILE"
 }
 
 configure_firewall() {
   local mode="$1"
   local ssh_port
+  local -a managed_rules=()
+  local -a previous_rules=()
   ssh_port="$(detect_ssh_port)"
+
+  if [[ -f "$UFW_STATE_FILE" ]]; then
+    mapfile -t previous_rules < "$UFW_STATE_FILE"
+  fi
 
   info "Настройка UFW."
 
-  if confirm "Сбросить существующие правила UFW и оставить правила этой ноды?"; then
+  if confirm_no_default "Сбросить существующие правила UFW и оставить правила этой ноды?"; then
     ufw --force reset >/dev/null
   else
     warn "Существующие правила UFW будут сохранены."
+    remove_managed_ufw_rules
   fi
 
   ufw default deny incoming >/dev/null
@@ -355,30 +470,42 @@ configure_firewall() {
   fi
 
   if [[ -n "$PANEL_IP" ]]; then
-    ufw allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp >/dev/null
+    managed_rules+=("allow from ${PANEL_IP} to any port ${NODE_PORT} proto tcp")
   else
-    ufw allow "${NODE_PORT}/tcp" >/dev/null
+    managed_rules+=("allow ${NODE_PORT}/tcp")
   fi
 
-  if [[ "$mode" == "basic" ]]; then
-    # Useful default for a later VLESS inbound.
-    ufw allow 443/tcp >/dev/null
-  else
+  if [[ "$mode" != "basic" ]]; then
     # HTTP-01 for acme.sh renewal.
-    ufw allow 80/tcp >/dev/null
+    managed_rules+=("allow 80/tcp")
 
     if [[ "$RAW_ENABLED" == "1" ]]; then
-      ufw allow "${RAW_PORT}/tcp" >/dev/null
+      managed_rules+=("allow ${RAW_PORT}/tcp")
     fi
 
     if [[ "$XHTTP_ENABLED" == "1" ]]; then
-      ufw allow "${XHTTP_PORT}/tcp" >/dev/null
+      managed_rules+=("allow ${XHTTP_PORT}/tcp")
     fi
 
     if [[ "$HY2_ENABLED" == "1" ]]; then
-      ufw allow "${HY2_PORT}/udp" >/dev/null
+      managed_rules+=("allow ${HY2_PORT}/udp")
     fi
   fi
+
+  local rule
+  for rule in "${managed_rules[@]}"; do
+    if ! apply_managed_ufw_rule "$rule"; then
+      err "Не удалось добавить правило UFW: ${rule}"
+      remove_managed_ufw_rules
+      local previous_rule
+      for previous_rule in "${previous_rules[@]}"; do
+        [[ -n "$previous_rule" ]] && apply_managed_ufw_rule "$previous_rule" || true
+      done
+      ((${#previous_rules[@]} == 0)) || save_managed_ufw_rules "${previous_rules[@]}"
+      die "Новые правила UFW не применены; выполнена попытка восстановить предыдущие."
+    fi
+  done
+  save_managed_ufw_rules "${managed_rules[@]}"
 
   ufw --force enable >/dev/null
   ufw reload >/dev/null
@@ -387,15 +514,65 @@ configure_firewall() {
   ufw status verbose
 }
 
-write_basic_compose() {
-  backup_file "${BASE_DIR}/docker-compose.yml"
+validate_selected_port_plan() {
+  local ssh_port
+  ssh_port="$(detect_ssh_port)"
 
-  cat > "${BASE_DIR}/docker-compose.yml" <<'EOF'
+  local -A reserved_tcp=(
+    ["$NODE_PORT"]="RemnaNode API"
+    ["$ssh_port"]="SSH"
+    ["80"]="ACME HTTP-01"
+  )
+
+  if [[ "$RAW_ENABLED" == "1" ]]; then
+    [[ -z "${reserved_tcp[$RAW_PORT]:-}" ]] \
+      || die "TCP ${RAW_PORT} уже зарезервирован для ${reserved_tcp[$RAW_PORT]}."
+    reserved_tcp["$RAW_PORT"]="VLESS RAW"
+  fi
+
+  if [[ "$XHTTP_ENABLED" == "1" ]]; then
+    [[ -z "${reserved_tcp[$XHTTP_PORT]:-}" ]] \
+      || die "TCP ${XHTTP_PORT} уже зарезервирован для ${reserved_tcp[$XHTTP_PORT]}."
+    reserved_tcp["$XHTTP_PORT"]="VLESS XHTTP"
+  fi
+}
+
+ensure_selected_ports_free() {
+  local port
+  local -a tcp_ports=("$NODE_PORT")
+
+  [[ "$RAW_ENABLED" == "1" ]] && tcp_ports+=("$RAW_PORT")
+  [[ "$XHTTP_ENABLED" == "1" ]] && tcp_ports+=("$XHTTP_PORT")
+
+  for port in "${tcp_ports[@]}"; do
+    if ss -H -lnt "( sport = :${port} )" 2>/dev/null | grep -q .; then
+      die "TCP ${port} уже занят. Освободи порт перед установкой."
+    fi
+  done
+
+  if [[ "$HY2_ENABLED" == "1" ]] \
+    && ss -H -lnu "( sport = :${HY2_PORT} )" 2>/dev/null | grep -q .; then
+    die "UDP ${HY2_PORT} уже занят. Освободи порт перед установкой."
+  fi
+}
+
+ensure_fresh_install_target() {
+  if [[ -f "$NODE_COMPOSE_FILE" ]]; then
+    die "В ${BASE_DIR} уже есть установка. Используй обновление или сначала удали существующую ноду."
+  fi
+}
+
+write_basic_compose() {
+  local compose_file="$NODE_COMPOSE_FILE"
+  local tmp_file
+  tmp_file="$(mktemp "${compose_file}.tmp.XXXXXX")"
+
+  cat > "$tmp_file" <<EOF
 services:
   remnanode:
     container_name: remnanode
     hostname: remnanode
-    image: remnawave/node:latest
+    image: ${REMNAWAVE_IMAGE}
     network_mode: host
     restart: always
 
@@ -416,20 +593,27 @@ services:
     volumes:
       - /dev/shm:/dev/shm:rw
 
-    env_file:
-      - .env
+    environment:
+      NODE_PORT: '${NODE_PORT}'
+      SECRET_KEY: '${SECRET_KEY}'
 EOF
+
+  docker compose -f "$tmp_file" config >/dev/null
+  backup_file "$compose_file"
+  mv -f "$tmp_file" "$compose_file"
 }
 
 write_selfsteal_compose() {
-  backup_file "${BASE_DIR}/docker-compose.yml"
+  local compose_file="$NODE_COMPOSE_FILE"
+  local tmp_file
+  tmp_file="$(mktemp "${compose_file}.tmp.XXXXXX")"
 
-  cat > "${BASE_DIR}/docker-compose.yml" <<'EOF'
+  cat > "$tmp_file" <<EOF
 services:
   nginx-selfsteal:
     container_name: nginx-selfsteal
     hostname: nginx-selfsteal
-    image: nginx:alpine
+    image: ${NGINX_IMAGE}
     restart: always
 
     logging:
@@ -460,7 +644,7 @@ services:
   remnanode:
     container_name: remnanode
     hostname: remnanode
-    image: remnawave/node:latest
+    image: ${REMNAWAVE_IMAGE}
     network_mode: host
     restart: always
 
@@ -487,15 +671,116 @@ services:
       # Makes the node-local certificate available to Xray/Hysteria2.
       - /opt/remnanode/ssl:/opt/remnanode/ssl:ro
 
-    env_file:
-      - .env
+    environment:
+      NODE_PORT: '${NODE_PORT}'
+      SECRET_KEY: '${SECRET_KEY}'
 EOF
+
+
+  docker compose -f "$tmp_file" config >/dev/null
+  backup_file "$compose_file"
+  mv -f "$tmp_file" "$compose_file"
+}
+
+detect_existing_compose() {
+  docker inspect remnanode >/dev/null 2>&1 \
+    || die "Контейнер remnanode не найден. Для этого режима Node должна быть уже запущена."
+
+  local detected_file detected_service
+  detected_file="$(docker inspect remnanode \
+    --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null || true)"
+  detected_service="$(docker inspect remnanode \
+    --format '{{ index .Config.Labels "com.docker.compose.service" }}' 2>/dev/null || true)"
+
+  detected_file="${detected_file%%,*}"
+  [[ "$detected_file" == "<no value>" ]] && detected_file=""
+  [[ "$detected_service" == "<no value>" ]] && detected_service=""
+
+  if [[ -z "$detected_file" && -f "$NODE_COMPOSE_FILE" ]]; then
+    detected_file="$NODE_COMPOSE_FILE"
+  fi
+
+  local compose_input
+  read -r -p "Путь к docker-compose.yml существующей Node${detected_file:+ [${detected_file}]}: " compose_input
+  NODE_COMPOSE_FILE="${compose_input:-$detected_file}"
+  [[ -f "$NODE_COMPOSE_FILE" ]] || die "Compose-файл существующей Node не найден: ${NODE_COMPOSE_FILE:-не указан}"
+
+  NODE_SERVICE_NAME="${detected_service:-remnanode}"
+  [[ "$NODE_SERVICE_NAME" =~ ^[a-zA-Z0-9._-]+$ ]] \
+    || die "Некорректное имя Compose-сервиса Node: ${NODE_SERVICE_NAME}"
+
+  docker compose -f "$NODE_COMPOSE_FILE" config --services \
+    | grep -Fxq "$NODE_SERVICE_NAME" \
+    || die "Сервис ${NODE_SERVICE_NAME} отсутствует в ${NODE_COMPOSE_FILE}."
+
+  local existing_node_port
+  existing_node_port="$(docker inspect remnanode --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | awk -F= '$1 == "NODE_PORT" {print $2; exit}')"
+  if [[ -n "$existing_node_port" ]]; then
+    validate_port "$existing_node_port" || die "У существующей Node некорректный NODE_PORT: ${existing_node_port}"
+    NODE_PORT="$existing_node_port"
+  fi
+}
+
+write_selfsteal_override_compose() {
+  local tmp_file
+  tmp_file="$(mktemp "${SELFSTEAL_OVERRIDE_FILE}.tmp.XXXXXX")"
+
+  cat > "$tmp_file" <<EOF
+services:
+  nginx-selfsteal:
+    container_name: nginx-selfsteal
+    hostname: nginx-selfsteal
+    image: ${NGINX_IMAGE}
+    restart: always
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+    volumes:
+      - /dev/shm:/dev/shm:rw
+      - /opt/remnanode/ssl:/etc/nginx/ssl:ro
+      - /opt/remnanode/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /opt/remnanode/html:/var/www/html:ro
+
+    command: >
+      /bin/sh -c "
+      rm -f /dev/shm/nginx.sock &&
+      exec nginx -g 'daemon off;'
+      "
+
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /dev/shm/nginx.sock || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 3s
+
+  ${NODE_SERVICE_NAME}:
+    depends_on:
+      nginx-selfsteal:
+        condition: service_healthy
+
+    volumes:
+      - /dev/shm:/dev/shm:rw
+      - /opt/remnanode/ssl:/opt/remnanode/ssl:ro
+EOF
+
+  docker compose -f "$NODE_COMPOSE_FILE" -f "$tmp_file" config >/dev/null
+  backup_file "$SELFSTEAL_OVERRIDE_FILE"
+  mv -f "$tmp_file" "$SELFSTEAL_OVERRIDE_FILE"
 }
 
 write_nginx_conf() {
   local domain="$1"
+  local nginx_file="${BASE_DIR}/nginx.conf"
+  local tmp_file
+  tmp_file="$(mktemp "${nginx_file}.tmp.XXXXXX")"
 
-  cat > "${BASE_DIR}/nginx.conf" <<EOF
+  cat > "$tmp_file" <<EOF
 server_names_hash_bucket_size 64;
 
 ssl_protocols TLSv1.2 TLSv1.3;
@@ -545,17 +830,21 @@ server {
     return 444;
 }
 EOF
+
+  chmod 644 "$tmp_file"
+  backup_file "$nginx_file"
+  mv -f "$tmp_file" "$nginx_file"
 }
 
 write_site_files() {
   local domain="$1"
   local service_name="$2"
   local current_year
+  local output_dir backup_dir
   current_year="$(date +%Y)"
+  output_dir="$(mktemp -d "${BASE_DIR}/html.tmp.XXXXXX")"
 
-  mkdir -p "${BASE_DIR}/html"
-
-  cat > "${BASE_DIR}/html/index.html" <<EOF
+  cat > "${output_dir}/index.html" <<EOF
 <!doctype html>
 <html lang="en">
 <head>
@@ -615,41 +904,20 @@ write_site_files() {
       </div>
     </section>
 
-    <section class="auth-card" aria-label="Workspace sign in">
+    <section class="auth-card" aria-label="Gateway status">
       <div class="card-head">
         <div class="cloud-icon" aria-hidden="true">
           <svg viewBox="0 0 48 48"><path d="M14 35h21a8 8 0 0 0 .8-15.96A12 12 0 0 0 13 15.5 10 10 0 0 0 14 35Z"/></svg>
         </div>
-        <h2>Sign in</h2>
-        <p>Continue to ${service_name} Cloud</p>
+        <h2>Gateway online</h2>
+        <p>${service_name} Cloud</p>
       </div>
 
-      <form id="loginForm" autocomplete="off" novalidate>
-        <label for="account">Account</label>
-        <div class="field">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0"/></svg>
-          <input id="account" type="text" autocomplete="off" placeholder="name@company">
-        </div>
-
-        <label for="password">Password</label>
-        <div class="field">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-          <input id="password" type="password" autocomplete="new-password" placeholder="Enter password">
-        </div>
-
-        <div class="form-row">
-          <label class="remember"><input type="checkbox"><span>Remember this device</span></label>
-          <button class="link-button" type="button" id="helpButton">Need help?</button>
-        </div>
-
-        <button class="primary" type="submit">Sign in</button>
-      </form>
-
-      <div id="notice" class="notice" role="status" aria-live="polite">
-        <span class="notice-icon">i</span>
+      <div class="notice visible" role="status">
+        <span class="notice-icon">✓</span>
         <div>
-          <strong>Authentication temporarily unavailable</strong>
-          <p>This gateway does not accept interactive sign-ins. Contact your workspace administrator.</p>
+          <strong>Secure endpoint is available</strong>
+          <p>This page is a service endpoint. No interactive sign-in is required.</p>
         </div>
       </div>
 
@@ -666,12 +934,11 @@ write_site_files() {
     <nav><span>Security</span><span>Privacy</span><span>Status</span></nav>
   </footer>
 
-  <script src="/app.js"></script>
 </body>
 </html>
 EOF
 
-  cat > "${BASE_DIR}/html/style.css" <<'EOF'
+  cat > "${output_dir}/style.css" <<'EOF'
 :root {
   color-scheme: light;
   --ink: #101828;
@@ -768,31 +1035,8 @@ body {
 .cloud-icon svg { width: 28px; fill: none; stroke: #fff; stroke-width: 1.6; }
 .card-head h2 { margin: 0; font-size: 25px; letter-spacing: -.7px; }
 .card-head p { margin: 7px 0 28px; font-size: 13px; color: var(--muted); }
-form > label { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 650; color: #344054; }
-.field { position: relative; margin-bottom: 19px; }
-.field svg {
-  position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
-  width: 17px; fill: none; stroke: var(--faint); stroke-width: 1.7;
-}
-.field input {
-  width: 100%; height: 47px; padding: 0 14px 0 42px; border: 1px solid #d0d5dd;
-  border-radius: 10px; outline: none; background: rgba(255,255,255,.9); color: var(--ink);
-  font: inherit; font-size: 13px; transition: border-color .15s, box-shadow .15s;
-}
-.field input:focus { border-color: #6b8bf0; box-shadow: 0 0 0 3px rgba(74,112,226,.11); }
-.form-row { margin: 1px 0 22px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.remember { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; cursor: pointer; }
-.remember input { accent-color: var(--blue); }
-.link-button { border: 0; padding: 0; background: none; color: #4169e1; font: inherit; font-size: 11px; cursor: pointer; }
-.primary {
-  width: 100%; height: 47px; border: 0; border-radius: 10px;
-  background: linear-gradient(135deg,var(--blue),#486fe5); color: #fff;
-  font-size: 13px; font-weight: 700; cursor: pointer;
-  box-shadow: 0 9px 22px rgba(49,95,222,.20); transition: transform .12s, box-shadow .12s;
-}
-.primary:hover { transform: translateY(-1px); box-shadow: 0 12px 26px rgba(49,95,222,.25); }
 .notice {
-  display: none; margin-top: 18px; padding: 13px; gap: 10px;
+  display: none; padding: 16px; gap: 10px;
   border: 1px solid var(--line); border-radius: 10px; background: #f8fafc;
 }
 .notice.visible { display: flex; }
@@ -827,29 +1071,7 @@ form > label { display: block; margin-bottom: 7px; font-size: 12px; font-weight:
 }
 EOF
 
-  cat > "${BASE_DIR}/html/app.js" <<'EOF'
-(() => {
-  const form = document.getElementById('loginForm');
-  const notice = document.getElementById('notice');
-  const password = document.getElementById('password');
-  const help = document.getElementById('helpButton');
-
-  const showNotice = () => {
-    // Deliberately do not read, submit, persist or transmit credentials.
-    if (password) password.value = '';
-    notice?.classList.add('visible');
-  };
-
-  form?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    showNotice();
-  });
-
-  help?.addEventListener('click', showNotice);
-})();
-EOF
-
-  cat > "${BASE_DIR}/html/favicon.svg" <<'EOF'
+  cat > "${output_dir}/favicon.svg" <<'EOF'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <rect width="64" height="64" rx="16" fill="#111827"/>
   <path d="M18 44h27a10 10 0 0 0 1-19.9A15 15 0 0 0 17.4 19 12 12 0 0 0 18 44Z"
@@ -857,12 +1079,12 @@ EOF
 </svg>
 EOF
 
-  cat > "${BASE_DIR}/html/robots.txt" <<'EOF'
+  cat > "${output_dir}/robots.txt" <<'EOF'
 User-agent: *
 Disallow: /
 EOF
 
-  cat > "${BASE_DIR}/html/404.html" <<EOF
+  cat > "${output_dir}/404.html" <<EOF
 <!doctype html>
 <meta charset="utf-8">
 <title>${service_name} Cloud</title>
@@ -872,6 +1094,21 @@ main{text-align:center}p{color:#667085}
 </style>
 <main><h1>Page unavailable</h1><p>The requested cloud resource is not available on ${domain}.</p></main>
 EOF
+
+  chmod 755 "$output_dir"
+  chmod 644 "$output_dir"/*
+
+  if [[ -d "${BASE_DIR}/html" ]]; then
+    if find "${BASE_DIR}/html" -mindepth 1 -print -quit | grep -q .; then
+      backup_dir="${BASE_DIR}/html.backup-$(date +%Y%m%d-%H%M%S-%N)"
+      mv "${BASE_DIR}/html" "$backup_dir"
+      info "Backup: ${backup_dir}"
+    else
+      rmdir "${BASE_DIR}/html"
+    fi
+  fi
+
+  mv "$output_dir" "${BASE_DIR}/html"
 }
 
 install_acme() {
@@ -879,7 +1116,17 @@ install_acme() {
 
   if [[ ! -x "$ACME_BIN" ]]; then
     info "Устанавливаю acme.sh..."
-    curl -fsSL https://get.acme.sh | sh -s "email=${email}"
+    local installer
+    installer="$(mktemp)"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL https://get.acme.sh -o "$installer"; then
+      rm -f "$installer"
+      die "Не удалось скачать установщик acme.sh."
+    fi
+    if ! sh "$installer" "email=${email}"; then
+      rm -f "$installer"
+      die "Установщик acme.sh завершился с ошибкой."
+    fi
+    rm -f "$installer"
   else
     ok "acme.sh уже установлен."
   fi
@@ -975,7 +1222,7 @@ renew_certificate() {
   local force="${1:-0}"
 
   load_state
-  [[ "$INSTALL_MODE" == "selfsteal" ]] || die "SSL не настроен этим manager."
+  is_selfsteal_mode || die "SSL не настроен этим manager."
   [[ -n "$DOMAIN" ]] || die "Неизвестен домен."
   [[ -x "$ACME_BIN" ]] || die "acme.sh не установлен."
 
@@ -1121,7 +1368,7 @@ generate_reality_material() {
     return 0
   fi
 
-  [[ -f "${BASE_DIR}/docker-compose.yml" ]] || die "docker-compose.yml отсутствует."
+  [[ -f "$NODE_COMPOSE_FILE" ]] || die "Compose-файл Node отсутствует: ${NODE_COMPOSE_FILE}"
   docker inspect remnanode >/dev/null 2>&1 || die "Контейнер remnanode не запущен."
 
   local output
@@ -1132,7 +1379,11 @@ generate_reality_material() {
   REALITY_PUBLIC_KEY="$(printf '%s\n' "$output" | awk -F': *' 'tolower($1) ~ /(public|password)/ {print $2; exit}')"
 
   [[ -n "$REALITY_PRIVATE_KEY" ]] || die "Не удалось определить Reality Private Key."
-  [[ -n "$REALITY_PUBLIC_KEY" ]] || warn "Не удалось автоматически определить Reality Public Key/Password."
+  [[ -n "$REALITY_PUBLIC_KEY" ]] || die "Не удалось определить Reality Public Key/Password."
+  [[ "$REALITY_PRIVATE_KEY" =~ ^[A-Za-z0-9_=-]{32,128}$ ]] \
+    || die "Xray вернул Reality Private Key в неожиданном формате."
+  [[ "$REALITY_PUBLIC_KEY" =~ ^[A-Za-z0-9_=-]{32,128}$ ]] \
+    || die "Xray вернул Reality Public Key в неожиданном формате."
 
   RAW_SHORT_ID="$(openssl rand -hex 8)"
   XHTTP_SHORT_ID="$(openssl rand -hex 8)"
@@ -1168,14 +1419,18 @@ join_by_comma() {
 }
 
 generate_xray_profile() {
-  load_state
+  local use_current_state="${1:-0}"
+  [[ "$use_current_state" == "1" ]] || load_state
 
-  [[ "$INSTALL_MODE" == "selfsteal" ]] || die "Профиль Selfsteal не настроен."
+  is_selfsteal_mode || die "Профиль Selfsteal не настроен."
   [[ -n "$DOMAIN" ]] || die "DOMAIN отсутствует."
 
   mkdir -p "$PROFILE_DIR"
 
   local inbounds=()
+  local profile_tmp profile_info_tmp
+  profile_tmp="$(mktemp "${PROFILE_FILE}.tmp.XXXXXX")"
+  profile_info_tmp="$(mktemp "${PROFILE_INFO}.tmp.XXXXXX")"
 
   if [[ "$RAW_ENABLED" == "1" || "$XHTTP_ENABLED" == "1" ]]; then
     generate_reality_material
@@ -1296,7 +1551,7 @@ EOF
   local inbound_json
   inbound_json="$(join_by_comma "${inbounds[@]}")"
 
-  cat > "$PROFILE_FILE" <<EOF
+  cat > "$profile_tmp" <<EOF
 {
   "log": {
     "loglevel": "warning"
@@ -1339,8 +1594,9 @@ ${inbound_json}
 }
 EOF
 
-  jq empty "$PROFILE_FILE" || die "Сгенерирован некорректный JSON profile."
-  chmod 600 "$PROFILE_FILE"
+  jq empty "$profile_tmp" || die "Сгенерирован некорректный JSON profile."
+  chmod 600 "$profile_tmp"
+  mv -f "$profile_tmp" "$PROFILE_FILE"
 
   {
     echo "Remnawave Node Manager ${SCRIPT_VERSION}"
@@ -1384,18 +1640,24 @@ EOF
     fi
 
     echo "Profile: ${PROFILE_FILE}"
-  } > "$PROFILE_INFO"
+  } > "$profile_info_tmp"
 
-  chmod 600 "$PROFILE_INFO"
+  chmod 600 "$profile_info_tmp"
+  mv -f "$profile_info_tmp" "$PROFILE_INFO"
   ok "Xray profile сгенерирован: ${PROFILE_FILE}"
 
-  validate_generated_profile || true
+  validate_generated_profile
 }
 
 validate_generated_profile() {
   docker inspect remnanode >/dev/null 2>&1 || return 0
 
   info "Проверяю сгенерированный Xray JSON текущим Xray внутри remnanode..."
+
+  if ! docker exec remnanode sh -c 'command -v xray >/dev/null 2>&1'; then
+    warn "В контейнере нет доступной команды xray; выполнена только проверка синтаксиса JSON."
+    return 0
+  fi
 
   docker cp "$PROFILE_FILE" remnanode:/tmp/remnanode-manager-profile.json >/dev/null
 
@@ -1406,26 +1668,44 @@ validate_generated_profile() {
   else
     warn "Автотест Xray profile не прошёл. Версия Xray или конкретный inbound может требовать корректировки."
     warn "Проверь вручную перед push в Panel: ${PROFILE_FILE}"
+    docker exec remnanode rm -f /tmp/remnanode-manager-profile.json >/dev/null 2>&1 || true
+    return 1
   fi
 
   docker exec remnanode rm -f /tmp/remnanode-manager-profile.json >/dev/null 2>&1 || true
 }
 
+manager_compose() {
+  local -a compose_args=(-f "$NODE_COMPOSE_FILE")
+  if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
+    compose_args+=(-f "$SELFSTEAL_OVERRIDE_FILE")
+  fi
+  docker compose "${compose_args[@]}" "$@"
+}
+
 start_stack() {
-  cd "$BASE_DIR"
-  docker compose config >/dev/null
-  docker compose pull
-  docker compose up -d --remove-orphans
+  manager_compose config >/dev/null
+  manager_compose pull
+  manager_compose up -d --remove-orphans
 }
 
 verify_basic() {
   echo
   info "Проверка RemnaNode..."
-  docker compose -f "${BASE_DIR}/docker-compose.yml" ps
+  manager_compose ps
 
-  docker inspect remnanode --format 'remnanode: {{.State.Status}}' 2>/dev/null || true
+  local state=""
+  local attempt
+  for attempt in {1..15}; do
+    state="$(docker inspect remnanode --format '{{.State.Status}}' 2>/dev/null || true)"
+    [[ "$state" == "running" ]] && break
+    sleep 2
+  done
 
-  if ss -lntp 2>/dev/null | grep -q ":${NODE_PORT}"; then
+  [[ "$state" == "running" ]] || die "Контейнер remnanode не перешёл в состояние running."
+  ok "Контейнер remnanode запущен."
+
+  if ss -H -lnt "( sport = :${NODE_PORT} )" 2>/dev/null | grep -q .; then
     ok "Node API слушает TCP ${NODE_PORT}."
   else
     warn "TCP ${NODE_PORT} пока не виден. Проверь docker logs remnanode."
@@ -1439,6 +1719,10 @@ verify_selfsteal_local() {
   }
 
   docker exec nginx-selfsteal nginx -t
+
+  local health
+  health="$(docker inspect nginx-selfsteal --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')"
+  [[ "$health" == "healthy" ]] || die "nginx-selfsteal не прошёл healthcheck: ${health}."
 
   test -S /dev/shm/nginx.sock || die "Не найден /dev/shm/nginx.sock на хосте."
 
@@ -1482,10 +1766,10 @@ diagnostics() {
 
   echo
   echo "--- Containers ---"
-  if [[ -f "${BASE_DIR}/docker-compose.yml" ]]; then
-    (cd "$BASE_DIR" && docker compose ps) || true
+  if [[ -f "$NODE_COMPOSE_FILE" ]]; then
+    manager_compose ps || true
   else
-    warn "docker-compose.yml отсутствует."
+    warn "Compose-файл Node отсутствует: ${NODE_COMPOSE_FILE}"
   fi
 
   echo
@@ -1496,7 +1780,7 @@ diagnostics() {
   echo "--- Listening sockets ---"
   ss -lntup | grep -E "(:22 |:${NODE_PORT} |:${RAW_PORT:-0} |:${XHTTP_PORT:-0} |:${HY2_PORT:-0} )" || true
 
-  if [[ "$INSTALL_MODE" == "selfsteal" ]]; then
+  if is_selfsteal_mode; then
     echo
     echo "--- DNS ---"
     dig +short A "$DOMAIN" || true
@@ -1593,14 +1877,15 @@ show_profile_info() {
 configure_inbounds_existing() {
   load_state
 
-  [[ "$INSTALL_MODE" == "selfsteal" ]] || die "Inbound manager доступен после установки режима SSL/Selfsteal."
+  is_selfsteal_mode || die "Inbound manager доступен после установки режима SSL/Selfsteal."
 
   prompt_inbounds
+  validate_selected_port_plan
   tune_hysteria_udp
-  save_state
 
   configure_firewall "selfsteal"
-  generate_xray_profile
+  generate_xray_profile 1
+  save_state
 
   warn "Manager только генерирует профиль. Его нужно сохранить/запушить в Remnawave Panel."
 }
@@ -1636,7 +1921,7 @@ prompt_domain_and_site() {
 change_domain() {
   load_state
 
-  [[ "$INSTALL_MODE" == "selfsteal" ]] || die "Домен не настроен этим manager."
+  is_selfsteal_mode || die "Домен не настроен этим manager."
 
   local old_domain="$DOMAIN"
   local old_service="$SERVICE_NAME"
@@ -1659,8 +1944,8 @@ change_domain() {
 
   write_nginx_conf "$DOMAIN"
   write_site_files "$DOMAIN" "$SERVICE_NAME"
+  generate_xray_profile 1
   save_state
-  generate_xray_profile
 
   docker restart nginx-selfsteal >/dev/null 2>&1 || true
 
@@ -1677,7 +1962,7 @@ change_domain() {
 ssl_menu() {
   load_state
 
-  [[ "$INSTALL_MODE" == "selfsteal" ]] || {
+  is_selfsteal_mode || {
     err "SSL/Selfsteal не настроен."
     pause
     return
@@ -1730,14 +2015,12 @@ ssl_menu() {
 }
 
 update_node() {
-  [[ -f "${BASE_DIR}/docker-compose.yml" ]] || die "Нода не установлена в ${BASE_DIR}."
+  load_state
+  [[ -f "$NODE_COMPOSE_FILE" ]] || die "Compose-файл Node отсутствует: ${NODE_COMPOSE_FILE}"
 
   info "Обновляю Docker images..."
-  (
-    cd "$BASE_DIR"
-    docker compose pull
-    docker compose up -d --remove-orphans
-  )
+  manager_compose pull
+  manager_compose up -d --remove-orphans
 
   ok "Контейнеры обновлены."
   verify_basic
@@ -1746,7 +2029,11 @@ update_node() {
 remove_node() {
   load_state
 
-  warn "Будут остановлены контейнеры RemnaNode/Nginx и при подтверждении удалён ${BASE_DIR}."
+  if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
+    warn "Будет удалён Selfsteal/Nginx. Существующая RemnaNode и её Compose-файл останутся на месте."
+  else
+    warn "Будут остановлены контейнеры RemnaNode/Nginx и при подтверждении удалён ${BASE_DIR}."
+  fi
   echo
   read -r -p "Для продолжения введи DELETE: " token
   [[ "$token" == "DELETE" ]] || {
@@ -1754,29 +2041,56 @@ remove_node() {
     return 0
   }
 
-  if [[ -f "${BASE_DIR}/docker-compose.yml" ]]; then
-    (cd "$BASE_DIR" && docker compose down --remove-orphans) || true
+  if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
+    docker rm -f nginx-selfsteal >/dev/null 2>&1 || true
+  elif [[ -f "$NODE_COMPOSE_FILE" ]]; then
+    manager_compose down --remove-orphans || true
   fi
 
-  if [[ "$INSTALL_MODE" == "selfsteal" && -n "$DOMAIN" && -x "$ACME_BIN" ]]; then
+  if is_selfsteal_mode && [[ -n "$DOMAIN" && -x "$ACME_BIN" ]]; then
     if confirm "Убрать ${DOMAIN} из списка renew acme.sh?"; then
       "$ACME_BIN" --remove -d "$DOMAIN" --ecc || true
     fi
   fi
 
   rm -f "$RELOAD_HELPER"
+  rm -f /etc/sysctl.d/99-remnanode-hysteria.conf
+  sysctl --system >/dev/null 2>&1 || true
 
-  if confirm "Удалить все файлы ${BASE_DIR}?"; then
+  if [[ -f "$UFW_STATE_FILE" ]] || ufw status 2>/dev/null | grep -q remnanode-manager; then
+    remove_managed_ufw_rules
+    ufw reload >/dev/null 2>&1 || true
+    ok "Управляемые правила UFW удалены."
+  fi
+
+  if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
+    rm -f \
+      "$SELFSTEAL_OVERRIDE_FILE" \
+      "$STATE_FILE" \
+      "$REALITY_FILE" \
+      "$UFW_STATE_FILE" \
+      "${BASE_DIR}/nginx.conf" \
+      "$PROFILE_FILE" \
+      "$PROFILE_INFO"
+    ok "Selfsteal отключён; существующая Node и её данные сохранены."
+  elif confirm "Удалить все файлы ${BASE_DIR}?"; then
     rm -rf "$BASE_DIR"
   fi
 
-  warn "Docker, UFW и правило SSH не удалялись."
-  ok "RemnaNode installation removed."
+  warn "Docker и общие правила UFW/SSH не удалялись. Правила с меткой remnanode-manager удалены."
+  ok "Удаление завершено."
+
+  INSTALL_MODE=""
+  DOMAIN=""
+  NODE_COMPOSE_FILE="${BASE_DIR}/docker-compose.yml"
+  NODE_SERVICE_NAME="remnanode"
 }
 
 install_node_basic() {
+  ensure_fresh_install_target
   prompt_secret_and_panel
   install_base_packages
+  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
   install_docker
 
   ensure_base_dirs
@@ -1790,18 +2104,20 @@ install_node_basic() {
   XHTTP_ENABLED="0"
   HY2_ENABLED="0"
 
-  write_env
+  ensure_selected_ports_free
+
   write_basic_compose
-  save_state
   configure_firewall "basic"
 
   start_stack
   verify_basic
+  save_state
 
   ok "Remna Node установлен."
 }
 
 install_node_selfsteal() {
+  ensure_fresh_install_target
   prompt_secret_and_panel
 
   ACME_EMAIL=""
@@ -1811,18 +2127,20 @@ install_node_selfsteal() {
   prompt_inbounds
 
   install_base_packages
+  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
   install_docker
   ensure_base_dirs
 
+  validate_selected_port_plan
+  ensure_selected_ports_free
+
   INSTALL_MODE="selfsteal"
 
-  write_env
   write_site_files "$DOMAIN" "$SERVICE_NAME"
   write_nginx_conf "$DOMAIN"
   write_selfsteal_compose
 
   tune_hysteria_udp
-  save_state
 
   configure_firewall "selfsteal"
 
@@ -1832,7 +2150,8 @@ install_node_selfsteal() {
   verify_basic
   verify_selfsteal_local
 
-  generate_xray_profile
+  generate_xray_profile 1
+  save_state
 
   echo
   ok "Remna Node + SSL + Selfsteal установлен."
@@ -1843,12 +2162,58 @@ install_node_selfsteal() {
   warn "Следующий шаг: добавь ${PROFILE_FILE} в Remnawave Panel и назначь профиль этой ноде."
 }
 
+install_selfsteal_for_existing_node() {
+  command -v docker >/dev/null 2>&1 || die "Docker не установлен. Существующая RemnaNode не найдена."
+  docker compose version >/dev/null 2>&1 || die "Docker Compose не установлен."
+
+  detect_existing_compose
+  prompt_panel_network
+
+  ACME_EMAIL=""
+  prompt_domain_and_site "" ""
+
+  echo
+  prompt_inbounds
+
+  install_base_packages
+  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
+  ensure_base_dirs
+  validate_selected_port_plan
+
+  INSTALL_MODE="selfsteal-existing"
+
+  write_site_files "$DOMAIN" "$SERVICE_NAME"
+  write_nginx_conf "$DOMAIN"
+  write_selfsteal_override_compose
+
+  tune_hysteria_udp
+  configure_firewall "selfsteal"
+  issue_certificate "$DOMAIN" "$ACME_EMAIL"
+
+  start_stack
+  verify_basic
+  verify_selfsteal_local
+
+  generate_xray_profile 1
+  save_state
+
+  echo
+  ok "SSL / Selfsteal добавлен к существующей RemnaNode."
+  echo "Base Compose:       ${NODE_COMPOSE_FILE}"
+  echo "Selfsteal override: ${SELFSTEAL_OVERRIDE_FILE}"
+  echo "Generated profile:  ${PROFILE_FILE}"
+  echo "Connection info:    ${PROFILE_INFO}"
+  echo
+  warn "Следующий шаг: добавь ${PROFILE_FILE} в Remnawave Panel и назначь профиль этой ноде."
+}
+
 show_files() {
   echo
   echo "${BASE_DIR}/"
   echo "├── docker-compose.yml"
-  echo "├── .env"
+  echo "├── docker-compose.selfsteal.yml  # режим существующей Node"
   echo "├── installer.conf"
+  echo "├── ufw.rules"
   echo "├── nginx.conf"
   echo "├── reality.env"
   echo "├── ssl/"
@@ -1857,7 +2222,6 @@ show_files() {
   echo "├── html/"
   echo "│   ├── index.html"
   echo "│   ├── style.css"
-  echo "│   ├── app.js"
   echo "│   ├── favicon.svg"
   echo "│   ├── robots.txt"
   echo "│   └── 404.html"
@@ -1879,17 +2243,18 @@ show_menu() {
 
   echo
   echo "1. Установить Remna Node"
-  echo "2. Установить Remna Node + SSL / Selfsteal"
+  echo "2. Установить Remna Node + SSL / Selfsteal / сайт-заглушку"
+  echo "3. Добавить SSL / Selfsteal / сайт-заглушку к установленной Remna Node"
   echo
-  echo "3. Обновить RemnaNode / контейнеры"
-  echo "4. SSL / сертификаты"
-  echo "5. Диагностика Node / Selfsteal"
-  echo "6. Показать Reality keys / параметры профиля"
-  echo "7. Настроить inbound'ы / пересобрать Xray profile"
-  echo "8. Изменить домен / название cloud-заглушки"
-  echo "9. Сгенерировать новую Reality keypair"
-  echo "10. Показать структуру файлов"
-  echo "11. Удалить Node"
+  echo "4. Обновить RemnaNode / контейнеры"
+  echo "5. SSL / сертификаты"
+  echo "6. Диагностика Node / Selfsteal"
+  echo "7. Показать Reality keys / параметры профиля"
+  echo "8. Настроить inbound'ы / пересобрать Xray profile"
+  echo "9. Изменить домен / название cloud-заглушки"
+  echo "10. Сгенерировать новую Reality keypair"
+  echo "11. Показать структуру файлов"
+  echo "12. Удалить установленный стек / Selfsteal"
   echo
   echo "0. Выход"
   echo
@@ -1918,37 +2283,41 @@ main() {
         pause
         ;;
       3)
-        update_node
+        install_selfsteal_for_existing_node
         pause
         ;;
       4)
-        ssl_menu
+        update_node
+        pause
         ;;
       5)
+        ssl_menu
+        ;;
+      6)
         diagnostics
         pause
         ;;
-      6)
+      7)
         show_profile_info
         pause
         ;;
-      7)
+      8)
         configure_inbounds_existing
         pause
         ;;
-      8)
+      9)
         change_domain
         pause
         ;;
-      9)
+      10)
         rotate_reality_keys
         pause
         ;;
-      10)
+      11)
         show_files
         pause
         ;;
-      11)
+      12)
         remove_node
         pause
         ;;
@@ -1963,4 +2332,6 @@ main() {
   done
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
