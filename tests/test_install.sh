@@ -45,7 +45,7 @@ INSTALL_MODE=basic
 EOF
 
 load_state
-[[ "$SCRIPT_VERSION" == "2.2.0" ]]
+[[ "$SCRIPT_VERSION" == "2.3.0" ]]
 [[ "$INSTALL_MODE" == "basic" ]]
 
 mkdir -p "${TEST_DIR}/bin"
@@ -59,19 +59,12 @@ PATH="${TEST_DIR}/bin:${PATH}"
 BASE_DIR="${TEST_DIR}/node"
 mkdir -p "$BASE_DIR"
 NODE_COMPOSE_FILE="${BASE_DIR}/docker-compose.yml"
-SELFSTEAL_OVERRIDE_FILE="${BASE_DIR}/docker-compose.selfsteal.yml"
 SECRET_KEY="test-secret-key"
 NODE_PORT="2222"
 
 write_basic_compose
 grep -Fq "SECRET_KEY: 'test-secret-key'" "$NODE_COMPOSE_FILE"
 assert_fail grep -q 'env_file' "$NODE_COMPOSE_FILE"
-
-NODE_SERVICE_NAME="remnanode"
-write_selfsteal_override_compose
-grep -Fq 'nginx-selfsteal:' "$SELFSTEAL_OVERRIDE_FILE"
-grep -Fq '/dev/shm:/dev/shm:rw' "$SELFSTEAL_OVERRIDE_FILE"
-assert_fail grep -q 'SECRET_KEY' "$SELFSTEAL_OVERRIDE_FILE"
 
 write_site_files node.example.com Example
 [[ -f "${BASE_DIR}/html/index.html" ]]

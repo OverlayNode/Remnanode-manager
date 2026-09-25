@@ -17,7 +17,7 @@ set -Eeuo pipefail
 #
 # Run as root.
 
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.3.0"
 
 REMNAWAVE_IMAGE="${REMNAWAVE_IMAGE:-remnawave/node:latest}"
 NGINX_IMAGE="${NGINX_IMAGE:-nginx:alpine}"
@@ -27,13 +27,15 @@ STATE_FILE="${BASE_DIR}/installer.conf"
 REALITY_FILE="${BASE_DIR}/reality.env"
 UFW_STATE_FILE="${BASE_DIR}/ufw.rules"
 NODE_COMPOSE_FILE="${BASE_DIR}/docker-compose.yml"
-SELFSTEAL_OVERRIDE_FILE="${BASE_DIR}/docker-compose.selfsteal.yml"
 PROFILE_DIR="${BASE_DIR}/profiles"
 PROFILE_FILE="${PROFILE_DIR}/xray-profile.json"
 PROFILE_INFO="${PROFILE_DIR}/profile-info.txt"
 
 NODE_PORT="2222"
 NODE_SERVICE_NAME="remnanode"
+ADDED_SHM_VOLUME="0"
+ADDED_SSL_VOLUME="0"
+ADDED_NGINX_DEPENDENCY="0"
 ACME_HOME="/root/.acme.sh"
 ACME_BIN="${ACME_HOME}/acme.sh"
 RELOAD_HELPER="/usr/local/sbin/reload-nginx-selfsteal"
@@ -235,6 +237,9 @@ save_state() {
     printf 'NODE_PORT=%q\n' "$NODE_PORT"
     printf 'NODE_COMPOSE_FILE=%q\n' "$NODE_COMPOSE_FILE"
     printf 'NODE_SERVICE_NAME=%q\n' "$NODE_SERVICE_NAME"
+    printf 'ADDED_SHM_VOLUME=%q\n' "$ADDED_SHM_VOLUME"
+    printf 'ADDED_SSL_VOLUME=%q\n' "$ADDED_SSL_VOLUME"
+    printf 'ADDED_NGINX_DEPENDENCY=%q\n' "$ADDED_NGINX_DEPENDENCY"
 
     printf 'RAW_ENABLED=%q\n' "$RAW_ENABLED"
     printf 'RAW_PORT=%q\n' "$RAW_PORT"
@@ -312,7 +317,8 @@ install_base_packages() {
     cron \
     iproute2 \
     jq \
-    python3-minimal
+    python3-minimal \
+    python3-yaml
 
   systemctl enable --now cron >/dev/null 2>&1 || true
   ok "Базовые пакеты установлены."
@@ -722,56 +728,198 @@ detect_existing_compose() {
   fi
 }
 
-write_selfsteal_override_compose() {
-  local tmp_file
-  tmp_file="$(mktemp "${SELFSTEAL_OVERRIDE_FILE}.tmp.XXXXXX")"
+update_existing_compose() {
+  local action="$1"
+  local tmp_file metadata
+  tmp_file="$(mktemp "${NODE_COMPOSE_FILE}.tmp.XXXXXX")"
 
-  cat > "$tmp_file" <<EOF
-services:
-  nginx-selfsteal:
-    container_name: nginx-selfsteal
-    hostname: nginx-selfsteal
-    image: ${NGINX_IMAGE}
-    restart: always
+  if ! metadata="$(python3 - \
+    "$NODE_COMPOSE_FILE" \
+    "$tmp_file" \
+    "$action" \
+    "$NODE_SERVICE_NAME" \
+    "$NGINX_IMAGE" \
+    "$ADDED_SHM_VOLUME" \
+    "$ADDED_SSL_VOLUME" \
+    "$ADDED_NGINX_DEPENDENCY" <<'PY'
+import sys
+from pathlib import Path
 
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
+import yaml
 
-    volumes:
-      - /dev/shm:/dev/shm:rw
-      - /opt/remnanode/ssl:/etc/nginx/ssl:ro
-      - /opt/remnanode/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - /opt/remnanode/html:/var/www/html:ro
+source, output, action, node_name, nginx_image = sys.argv[1:6]
+remove_shm, remove_ssl, remove_dependency = sys.argv[6:9]
 
-    command: >
-      /bin/sh -c "
-      rm -f /dev/shm/nginx.sock &&
-      exec nginx -g 'daemon off;'
-      "
+with open(source, "r", encoding="utf-8") as stream:
+    document = yaml.safe_load(stream) or {}
 
-    healthcheck:
-      test: ["CMD-SHELL", "test -S /dev/shm/nginx.sock || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 3s
+services = document.get("services")
+if not isinstance(services, dict):
+    raise SystemExit("Compose-файл не содержит корректную секцию services.")
 
-  ${NODE_SERVICE_NAME}:
-    depends_on:
-      nginx-selfsteal:
-        condition: service_healthy
+node = services.get(node_name)
+if not isinstance(node, dict):
+    raise SystemExit(f"Compose-сервис {node_name} не найден.")
 
-    volumes:
-      - /dev/shm:/dev/shm:rw
-      - /opt/remnanode/ssl:/opt/remnanode/ssl:ro
-EOF
 
-  docker compose -f "$NODE_COMPOSE_FILE" -f "$tmp_file" config >/dev/null
-  backup_file "$SELFSTEAL_OVERRIDE_FILE"
-  mv -f "$tmp_file" "$SELFSTEAL_OVERRIDE_FILE"
+def volume_parts(entry):
+    if isinstance(entry, str):
+        parts = entry.split(":", 2)
+        if len(parts) >= 2:
+            return parts[0], parts[1]
+    elif isinstance(entry, dict):
+        return entry.get("source"), entry.get("target")
+    return None, None
+
+
+def ensure_volume(volumes, source_path, target_path, read_only=False):
+    for entry in volumes:
+        current_source, current_target = volume_parts(entry)
+        if current_target == target_path:
+            if current_source != source_path:
+                raise SystemExit(
+                    f"Mount target {target_path} уже использует другой source: {current_source}"
+                )
+            return False
+
+    volume = {
+        "type": "bind",
+        "source": source_path,
+        "target": target_path,
+    }
+    if read_only:
+        volume["read_only"] = True
+    volumes.append(volume)
+    return True
+
+
+def remove_volume(volumes, source_path, target_path):
+    result = []
+    for entry in volumes:
+        current_source, current_target = volume_parts(entry)
+        if current_source == source_path and current_target == target_path:
+            continue
+        result.append(entry)
+    return result
+
+
+if action == "add":
+    if "nginx-selfsteal" in services:
+        raise SystemExit("Сервис nginx-selfsteal уже существует в Compose-файле.")
+
+    volumes = node.setdefault("volumes", [])
+    if not isinstance(volumes, list):
+        raise SystemExit("Секция volumes сервиса Node должна быть списком.")
+
+    added_shm = ensure_volume(volumes, "/dev/shm", "/dev/shm")
+    added_ssl = ensure_volume(
+        volumes, "/opt/remnanode/ssl", "/opt/remnanode/ssl", read_only=True
+    )
+
+    depends_on = node.get("depends_on")
+    if depends_on is None:
+        depends_on = {}
+    elif isinstance(depends_on, list):
+        depends_on = {name: {"condition": "service_started"} for name in depends_on}
+    elif not isinstance(depends_on, dict):
+        raise SystemExit("Секция depends_on сервиса Node имеет неподдерживаемый формат.")
+
+    added_dependency = "nginx-selfsteal" not in depends_on
+    depends_on["nginx-selfsteal"] = {"condition": "service_healthy"}
+    node["depends_on"] = depends_on
+
+    services["nginx-selfsteal"] = {
+        "container_name": "nginx-selfsteal",
+        "hostname": "nginx-selfsteal",
+        "image": nginx_image,
+        "restart": "always",
+        "logging": {
+            "driver": "json-file",
+            "options": {"max-size": "20m", "max-file": "3"},
+        },
+        "volumes": [
+            {"type": "bind", "source": "/dev/shm", "target": "/dev/shm"},
+            {
+                "type": "bind",
+                "source": "/opt/remnanode/ssl",
+                "target": "/etc/nginx/ssl",
+                "read_only": True,
+            },
+            {
+                "type": "bind",
+                "source": "/opt/remnanode/nginx.conf",
+                "target": "/etc/nginx/conf.d/default.conf",
+                "read_only": True,
+            },
+            {
+                "type": "bind",
+                "source": "/opt/remnanode/html",
+                "target": "/var/www/html",
+                "read_only": True,
+            },
+        ],
+        "command": "/bin/sh -c \"rm -f /dev/shm/nginx.sock && exec nginx -g 'daemon off;'\"",
+        "healthcheck": {
+            "test": ["CMD-SHELL", "test -S /dev/shm/nginx.sock || exit 1"],
+            "interval": "5s",
+            "timeout": "3s",
+            "retries": 12,
+            "start_period": "3s",
+        },
+    }
+    print(int(added_shm), int(added_ssl), int(added_dependency))
+
+elif action == "remove":
+    services.pop("nginx-selfsteal", None)
+
+    if remove_dependency == "1":
+        depends_on = node.get("depends_on")
+        if isinstance(depends_on, dict):
+            depends_on.pop("nginx-selfsteal", None)
+            if depends_on:
+                node["depends_on"] = depends_on
+            else:
+                node.pop("depends_on", None)
+        elif isinstance(depends_on, list):
+            node["depends_on"] = [name for name in depends_on if name != "nginx-selfsteal"]
+
+    volumes = node.get("volumes")
+    if isinstance(volumes, list):
+        if remove_shm == "1":
+            volumes = remove_volume(volumes, "/dev/shm", "/dev/shm")
+        if remove_ssl == "1":
+            volumes = remove_volume(
+                volumes, "/opt/remnanode/ssl", "/opt/remnanode/ssl"
+            )
+        if volumes:
+            node["volumes"] = volumes
+        else:
+            node.pop("volumes", None)
+else:
+    raise SystemExit(f"Неизвестное действие: {action}")
+
+with open(output, "w", encoding="utf-8", newline="\n") as stream:
+    yaml.safe_dump(document, stream, sort_keys=False, allow_unicode=True)
+PY
+  )"; then
+    rm -f "$tmp_file"
+    die "Не удалось изменить существующий Compose-файл."
+  fi
+
+  docker compose -f "$tmp_file" config >/dev/null \
+    || {
+      rm -f "$tmp_file"
+      die "Изменённый Compose-файл не прошёл проверку Docker Compose."
+    }
+
+  chmod --reference="$NODE_COMPOSE_FILE" "$tmp_file"
+  chown --reference="$NODE_COMPOSE_FILE" "$tmp_file"
+  backup_file "$NODE_COMPOSE_FILE"
+  mv -f "$tmp_file" "$NODE_COMPOSE_FILE"
+
+  if [[ "$action" == "add" ]]; then
+    read -r ADDED_SHM_VOLUME ADDED_SSL_VOLUME ADDED_NGINX_DEPENDENCY <<< "$metadata"
+  fi
 }
 
 write_nginx_conf() {
@@ -1676,11 +1824,7 @@ validate_generated_profile() {
 }
 
 manager_compose() {
-  local -a compose_args=(-f "$NODE_COMPOSE_FILE")
-  if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
-    compose_args+=(-f "$SELFSTEAL_OVERRIDE_FILE")
-  fi
-  docker compose "${compose_args[@]}" "$@"
+  docker compose -f "$NODE_COMPOSE_FILE" "$@"
 }
 
 start_stack() {
@@ -2043,6 +2187,8 @@ remove_node() {
 
   if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
     docker rm -f nginx-selfsteal >/dev/null 2>&1 || true
+    update_existing_compose remove
+    manager_compose up -d "$NODE_SERVICE_NAME" || true
   elif [[ -f "$NODE_COMPOSE_FILE" ]]; then
     manager_compose down --remove-orphans || true
   fi
@@ -2065,7 +2211,6 @@ remove_node() {
 
   if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
     rm -f \
-      "$SELFSTEAL_OVERRIDE_FILE" \
       "$STATE_FILE" \
       "$REALITY_FILE" \
       "$UFW_STATE_FILE" \
@@ -2184,7 +2329,8 @@ install_selfsteal_for_existing_node() {
 
   write_site_files "$DOMAIN" "$SERVICE_NAME"
   write_nginx_conf "$DOMAIN"
-  write_selfsteal_override_compose
+  update_existing_compose add
+  save_state
 
   tune_hysteria_udp
   configure_firewall "selfsteal"
@@ -2199,8 +2345,7 @@ install_selfsteal_for_existing_node() {
 
   echo
   ok "SSL / Selfsteal добавлен к существующей RemnaNode."
-  echo "Base Compose:       ${NODE_COMPOSE_FILE}"
-  echo "Selfsteal override: ${SELFSTEAL_OVERRIDE_FILE}"
+  echo "Compose:            ${NODE_COMPOSE_FILE}"
   echo "Generated profile:  ${PROFILE_FILE}"
   echo "Connection info:    ${PROFILE_INFO}"
   echo
@@ -2211,7 +2356,6 @@ show_files() {
   echo
   echo "${BASE_DIR}/"
   echo "├── docker-compose.yml"
-  echo "├── docker-compose.selfsteal.yml  # режим существующей Node"
   echo "├── installer.conf"
   echo "├── ufw.rules"
   echo "├── nginx.conf"

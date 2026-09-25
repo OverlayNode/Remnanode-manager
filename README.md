@@ -75,24 +75,21 @@ Compose-файл содержит секрет и создаётся с дост
 
 ## Уже установленная RemnaNode
 
-Пункт `3` добавляет Selfsteal к работающему контейнеру `remnanode`. Повторно вводить `SECRET_KEY` не требуется: скрипт сохраняет существующую конфигурацию Node без изменений.
+Пункт `3` добавляет Selfsteal к работающему контейнеру `remnanode`. Повторно вводить `SECRET_KEY` не требуется: скрипт сохраняет уже указанное значение в существующем Compose-файле.
 
 Менеджер определяет исходный Compose-файл через Docker labels. Если путь определить не удалось, его нужно указать вручную.
 
-Исходный Compose-файл не переписывается. В `/opt/remnanode/docker-compose.selfsteal.yml` создаётся override, который:
+Перед изменением создаётся резервная копия исходного Compose-файла. Затем менеджер непосредственно в нём:
 
 - добавляет сервис `nginx-selfsteal`;
 - подключает `/dev/shm` к Nginx и RemnaNode;
 - подключает локальные сертификаты к обоим контейнерам;
 - запускает RemnaNode после успешного healthcheck Nginx.
 
-После настройки менеджер запускает Compose с двумя файлами:
+Изменённый файл проверяется командой `docker compose config`, после чего стек применяется обычной командой:
 
 ```bash
-docker compose \
-  -f /путь/к/существующему/docker-compose.yml \
-  -f /opt/remnanode/docker-compose.selfsteal.yml \
-  up -d
+docker compose -f /путь/к/docker-compose.yml up -d
 ```
 
 Если исходный Compose использует другое имя сервиса, менеджер получает его из label `com.docker.compose.service`.
@@ -168,7 +165,6 @@ TCP-порт `80` должен оставаться доступным для п
 ```text
 /opt/remnanode/
 ├── docker-compose.yml
-├── docker-compose.selfsteal.yml
 ├── installer.conf
 ├── ufw.rules
 ├── nginx.conf
@@ -195,4 +191,4 @@ TCP-порт `80` должен оставаться доступным для п
 
 Для Node, установленной самим менеджером, удаление останавливает весь созданный Compose-стек и предлагает удалить `/opt/remnanode`.
 
-Для ранее существовавшей Node удаляется только `nginx-selfsteal`, Compose override и служебная конфигурация Selfsteal. Исходный Compose-файл и контейнер `remnanode` сохраняются.
+Для ранее существовавшей Node удаляется сервис `nginx-selfsteal`, а добавленные менеджером mounts и зависимость удаляются из исходного Compose-файла. Контейнер `remnanode`, его `SECRET_KEY` и остальные параметры сохраняются.
