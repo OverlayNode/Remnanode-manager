@@ -17,7 +17,6 @@
 ## Быстрый запуск
 
 ```bash
-sudo -i
 bash <(curl -Ls https://raw.githubusercontent.com/OverlayNode/Remnanode-manager/main/install.sh)
 ```
 
