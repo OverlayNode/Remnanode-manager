@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Scheduled maintenance — __BRAND__</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="__P__box">
+    <div class="__P__icon" aria-hidden="true">
+      <svg viewBox="0 0 64 64" width="64" height="64"><circle cx="32" cy="32" r="30" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="6 6"/><path d="M40 20a10 10 0 0 0-12.6 12.6L18 42l4 4 9.4-9.4A10 10 0 0 0 44 24l-6 6-4-4Z" fill="currentColor"/></svg>
+    </div>
+    <p class="__P__brand">__BRAND__</p>
+    <h1>We'll be back shortly</h1>
+    <p class="__P__lead">We're upgrading our infrastructure to make __BRAND__ faster and more reliable. Your data is safe and no action is required.</p>
+
+    <div class="__P__countdown" data-countdown>
+      <div><strong data-h>00</strong><span>hours</span></div>
+      <div><strong data-m>00</strong><span>minutes</span></div>
+      <div><strong data-s>00</strong><span>seconds</span></div>
+    </div>
+
+    <div class="__P__progress"><i data-progress></i></div>
+    <p class="__P__eta">Estimated completion: <b data-eta>—</b></p>
+
+    <ul class="__P__tasks">
+      <li class="__P__done">Database cluster migration</li>
+      <li class="__P__done">Storage replication check</li>
+      <li class="__P__run">Application servers rollout</li>
+      <li>Cache warm-up and verification</li>
+    </ul>
+
+    <p class="__P__foot">Maintenance window __BUILD__ · status updates: status.__DOMAIN__ · © __YEAR__ __BRAND__</p>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

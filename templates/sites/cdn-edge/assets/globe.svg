@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 520" width="520" height="520">
+  <defs>
+    <radialGradient id="sphere" cx="38%" cy="32%" r="70%">
+      <stop offset="0" stop-color="hsl(__HUE__,70%,32%)"/>
+      <stop offset=".65" stop-color="hsl(__HUE__,60%,14%)"/>
+      <stop offset="1" stop-color="hsl(__HUE__,50%,8%)"/>
+    </radialGradient>
+    <clipPath id="clip"><circle cx="260" cy="260" r="220"/></clipPath>
+  </defs>
+  <circle cx="260" cy="260" r="228" fill="none" stroke="hsl(__HUE__,90%,62%)" stroke-opacity=".25" stroke-width="2"/>
+  <circle cx="260" cy="260" r="220" fill="url(#sphere)"/>
+  <g clip-path="url(#clip)" fill="none" stroke="hsl(__HUE__,90%,70%)" stroke-opacity=".22" stroke-width="1">
+    <ellipse cx="260" cy="260" rx="220" ry="60"/>
+    <ellipse cx="260" cy="260" rx="220" ry="120"/>
+    <ellipse cx="260" cy="260" rx="220" ry="180"/>
+    <line x1="40" y1="260" x2="480" y2="260"/>
+    <ellipse cx="260" cy="260" rx="60" ry="220"/>
+    <ellipse cx="260" cy="260" rx="120" ry="220"/>
+    <ellipse cx="260" cy="260" rx="180" ry="220"/>
+    <line x1="260" y1="40" x2="260" y2="480"/>
+  </g>
+  <g clip-path="url(#clip)" fill="hsl(__HUE__,90%,75%)" fill-opacity=".55">
+    <path d="M120 150c30-20 70-25 95-10 20 12 10 35-12 40-18 4-22 22-40 30-25 10-55-5-60-25-4-15 5-27 17-35Z"/>
+    <path d="M190 250c20-8 45 0 55 18 12 22 5 55-10 80-12 20-35 30-45 20-12-12-5-35-10-55-5-22-8-55 10-63Z"/>
+    <path d="M270 120c35-18 90-15 120 5 25 17 30 45 10 60-18 13-40 5-60 12-22 8-35 30-55 22-22-9-40-40-35-65 3-17 10-28 20-34Z"/>
+    <path d="M300 250c25-5 55 10 60 35 6 28-12 60-35 70-20 8-38-10-42-32-5-25-8-68 17-73Z"/>
+    <path d="M390 300c20-10 45-2 50 18 5 22-15 40-35 38-18-2-35-15-32-32 2-10 8-19 17-24Z"/>
+  </g>
+  <g fill="none" stroke="hsl(__HUE2__,90%,65%)" stroke-width="1.5" stroke-opacity=".7">
+    <path d="M160 170Q260 90 290 140"/>
+    <path d="M290 140Q380 150 335 270"/>
+    <path d="M210 320Q260 380 335 270"/>
+    <path d="M160 170Q140 260 210 320"/>
+    <path d="M335 270Q400 250 410 320"/>
+  </g>
+</svg>

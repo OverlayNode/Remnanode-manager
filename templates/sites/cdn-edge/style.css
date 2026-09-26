@@ -1,0 +1,61 @@
+:root {
+  --h: __HUE__;
+  --h2: __HUE2__;
+  --glow: hsl(var(--h) 90% 62%);
+  --bg: hsl(var(--h) 45% 6%);
+  --panel: hsla(var(--h), 40%, 18%, .45);
+  --text: #e8eefc;
+  --muted: #93a0bd;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; color: var(--text);
+  font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  background: radial-gradient(ellipse at 70% 10%, hsla(var(--h), 70%, 30%, .45), transparent 55%), radial-gradient(ellipse at 10% 90%, hsla(var(--h2), 70%, 30%, .30), transparent 50%), var(--bg);
+}
+a { color: inherit; text-decoration: none; }
+.__P__bar { display: flex; align-items: center; justify-content: space-between; gap: 20px; max-width: 1200px; margin: 0 auto; padding: 22px 28px; }
+.__P__logo { display: flex; align-items: center; gap: 12px; font-weight: 700; letter-spacing: .3px; }
+.__P__hex { width: 26px; height: 28px; background: linear-gradient(160deg, var(--glow), hsl(var(--h2) 80% 55%)); clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.__P__bar nav { display: flex; gap: 30px; color: var(--muted); font-size: 15px; }
+.__P__bar nav a:hover { color: var(--text); }
+.__P__edge { font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--muted); border: 1px solid hsla(var(--h), 60%, 60%, .25); padding: 6px 10px; border-radius: 8px; }
+.__P__edge b { color: var(--glow); }
+.__P__hero { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 30px; max-width: 1200px; margin: 0 auto; padding: 40px 28px 30px; }
+.__P__tag { display: inline-block; padding: 5px 12px; border-radius: 999px; font-size: 12px; background: hsla(var(--h), 80%, 60%, .12); color: var(--glow); border: 1px solid hsla(var(--h), 80%, 60%, .3); }
+.__P__hero h1 { margin: 18px 0; font-size: clamp(40px, 5vw, 66px); line-height: 1.02; letter-spacing: -2px; }
+.__P__copy p { max-width: 500px; color: var(--muted); font-size: 18px; }
+.__P__stats { display: flex; gap: 36px; margin-top: 30px; }
+.__P__stats strong { display: block; font-size: 38px; font-weight: 700; color: #fff; }
+.__P__stats span { font-size: 13px; color: var(--muted); }
+.__P__globe { position: relative; justify-self: center; width: min(520px, 100%); }
+.__P__globe img { display: block; width: 100%; height: auto; filter: drop-shadow(0 0 60px hsla(var(--h), 90%, 55%, .35)); }
+.__P__ping { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--glow); box-shadow: 0 0 12px var(--glow); }
+.__P__ping::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid var(--glow); animation: __P__pulse 2.4s infinite; }
+.__P__p1 { left: 30%; top: 32%; }
+.__P__p2 { left: 55%; top: 26%; }
+.__P__p3 { left: 64%; top: 52%; }
+.__P__p4 { left: 40%; top: 62%; }
+.__P__p5 { left: 72%; top: 38%; }
+.__P__p2::after { animation-delay: .5s; }
+.__P__p3::after { animation-delay: 1s; }
+.__P__p4::after { animation-delay: 1.5s; }
+.__P__p5::after { animation-delay: .8s; }
+@keyframes __P__pulse { 0% { transform: scale(.6); opacity: 1; } 100% { transform: scale(2.6); opacity: 0; } }
+.__P__products { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; max-width: 1200px; margin: 0 auto; padding: 30px 28px; }
+.__P__products article { padding: 22px; border-radius: 16px; background: var(--panel); border: 1px solid hsla(var(--h), 60%, 60%, .14); backdrop-filter: blur(8px); }
+.__P__products h3 { margin: 0 0 8px; font-size: 17px; }
+.__P__products p { margin: 0; color: var(--muted); font-size: 14px; }
+.__P__pops { max-width: 1200px; margin: 0 auto; padding: 20px 28px 60px; }
+.__P__pops h2 { font-size: 26px; }
+.__P__pop-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+.__P__pop { padding: 10px 12px; border-radius: 10px; background: var(--panel); font: 13px ui-monospace, Menlo, Consolas, monospace; display: flex; justify-content: space-between; }
+.__P__pop i { font-style: normal; color: #4ade80; }
+.__P__footer { display: flex; justify-content: space-between; max-width: 1200px; margin: 0 auto; padding: 24px 28px 34px; font-size: 13px; color: var(--muted); border-top: 1px solid hsla(var(--h), 60%, 60%, .12); }
+@media (max-width: 960px) {
+  .__P__hero { grid-template-columns: 1fr; }
+  .__P__products { grid-template-columns: 1fr 1fr; }
+  .__P__pop-grid { grid-template-columns: repeat(3, 1fr); }
+  .__P__bar nav { display: none; }
+}
+@media (max-width: 560px) { .__P__products, .__P__pop-grid { grid-template-columns: 1fr 1fr; } .__P__stats { gap: 20px; } }

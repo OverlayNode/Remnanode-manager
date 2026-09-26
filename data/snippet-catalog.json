@@ -1,1 +1,0 @@
-{"schemaVersion":1,"types":["outbound","routing","dns","policy"],"presets":["freedom-direct","blackhole","private-networks-block","torrent-block","cloudflare-dns","google-dns","ru-direct","ads-block"]}

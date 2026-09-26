@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Fast, free unit converter for length, weight, temperature, data and speed.">
+  <title>__BRAND__ — Unit Converter</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="__P__top">
+    <a class="__P__logo" href="/"><span>⇄</span>__BRAND__</a>
+    <span class="__P__tagline">Quick conversions, no ads, works offline</span>
+  </header>
+
+  <main class="__P__main">
+    <div class="__P__tabs" role="tablist" data-tabs>
+      <button type="button" class="__P__tab __P__active" data-kind="length">Length</button>
+      <button type="button" class="__P__tab" data-kind="mass">Weight</button>
+      <button type="button" class="__P__tab" data-kind="temperature">Temperature</button>
+      <button type="button" class="__P__tab" data-kind="data">Data</button>
+      <button type="button" class="__P__tab" data-kind="speed">Speed</button>
+    </div>
+
+    <section class="__P__card">
+      <div class="__P__field">
+        <label for="from-value">From</label>
+        <div class="__P__input-row">
+          <input id="from-value" type="number" value="1" step="any" inputmode="decimal" data-from-value>
+          <select aria-label="From unit" data-from-unit></select>
+        </div>
+      </div>
+      <button type="button" class="__P__swap" aria-label="Swap units" data-swap>⇅</button>
+      <div class="__P__field">
+        <label for="to-value">To</label>
+        <div class="__P__input-row">
+          <input id="to-value" type="text" readonly data-to-value>
+          <select aria-label="To unit" data-to-unit></select>
+        </div>
+      </div>
+      <p class="__P__formula" data-formula></p>
+    </section>
+
+    <section class="__P__table-card">
+      <h2>Common conversions</h2>
+      <table class="__P__table"><tbody data-common></tbody></table>
+    </section>
+  </main>
+
+  <footer class="__P__foot">© __YEAR__ __BRAND__ · Conversions use exact SI factors · v__VERSION__ · __DOMAIN__</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

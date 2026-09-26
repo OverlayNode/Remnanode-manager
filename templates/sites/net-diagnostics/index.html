@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Check latency and jitter from your browser to the nearest __BRAND__ edge.">
+  <title>__BRAND__ Network Check</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="__P__head">
+    <a class="__P__brand" href="/">__BRAND__ <span>netcheck</span></a>
+    <span class="__P__server">Test server: <b>__DOMAIN__</b></span>
+  </header>
+
+  <main class="__P__main">
+    <section class="__P__gauge-card">
+      <svg class="__P__gauge" viewBox="0 0 220 140" aria-hidden="true">
+        <path class="__P__track" d="M20 120a90 90 0 0 1 180 0"/>
+        <path class="__P__value" d="M20 120a90 90 0 0 1 180 0" data-arc/>
+      </svg>
+      <div class="__P__reading"><strong data-latency>—</strong><span>ms latency</span></div>
+      <button type="button" class="__P__go" data-start>Start test</button>
+      <p class="__P__hint" data-status>Measures round-trip time from your browser to this server. No data is stored.</p>
+    </section>
+
+    <section class="__P__results">
+      <div><small>Ping (median)</small><strong data-ping>—</strong></div>
+      <div><small>Jitter</small><strong data-jitter>—</strong></div>
+      <div><small>Best / worst</small><strong data-range>—</strong></div>
+      <div><small>Samples</small><strong data-samples>0 / 20</strong></div>
+    </section>
+
+    <section class="__P__client">
+      <h2>Your connection</h2>
+      <dl>
+        <div><dt>Protocol</dt><dd data-proto>—</dd></div>
+        <div><dt>Network type</dt><dd data-net>—</dd></div>
+        <div><dt>Time zone</dt><dd data-tz>—</dd></div>
+        <div><dt>Screen</dt><dd data-screen>—</dd></div>
+        <div><dt>Language</dt><dd data-lang>—</dd></div>
+        <div><dt>Engine</dt><dd data-ua>—</dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="__P__foot">© __YEAR__ __BRAND__ · netcheck __VERSION__</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

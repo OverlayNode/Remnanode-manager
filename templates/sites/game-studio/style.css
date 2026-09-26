@@ -1,0 +1,47 @@
+:root {
+  --h: __HUE__;
+  --h2: __HUE2__;
+  --neon: hsl(var(--h2) 90% 62%);
+  --neon-2: hsl(var(--h) 90% 66%);
+  --bg: #07041a;
+  --text: #ece8ff;
+  --muted: #a39fc4;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 "Trebuchet MS", "Segoe UI", system-ui, sans-serif; }
+a { color: inherit; text-decoration: none; }
+.__P__nav { position: absolute; z-index: 3; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 24px 40px; }
+.__P__logo { font-weight: 800; font-size: 20px; letter-spacing: 1px; text-transform: uppercase; }
+.__P__logo span { color: var(--neon); }
+.__P__nav nav { display: flex; gap: 28px; text-transform: uppercase; font-size: 13px; letter-spacing: 2px; }
+.__P__nav nav a:hover { color: var(--neon); text-shadow: 0 0 12px var(--neon); }
+.__P__hero { position: relative; min-height: 88vh; display: flex; align-items: center; overflow: hidden; }
+.__P__hero-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.__P__hero::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(7, 4, 26, .92) 0%, rgba(7, 4, 26, .35) 60%, rgba(7, 4, 26, .2) 100%); }
+.__P__hero-copy { position: relative; z-index: 2; max-width: 560px; padding: 120px 40px 60px; }
+.__P__label { display: inline-block; padding: 5px 12px; border: 1px solid var(--neon); border-radius: 4px; color: var(--neon); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; box-shadow: 0 0 18px hsla(var(--h2), 90%, 60%, .4); }
+.__P__hero h1 { margin: 18px 0; padding-right: .25em; font-size: clamp(52px, 8vw, 110px); line-height: .9; letter-spacing: 4px; font-style: italic; background: linear-gradient(180deg, #fff 30%, var(--neon)); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 24px hsla(var(--h2), 90%, 60%, .5)); }
+.__P__hero-copy p { color: #d6d1f5; font-size: 18px; }
+.__P__platforms { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+.__P__platforms span { padding: 6px 12px; border-radius: 4px; background: rgba(255, 255, 255, .08); font-size: 13px; }
+.__P__games, .__P__news, .__P__jobs { max-width: 1160px; margin: 0 auto; padding: 60px 40px 10px; }
+.__P__games h2, .__P__news h2, .__P__jobs h2 { font-size: 30px; text-transform: uppercase; letter-spacing: 3px; }
+.__P__cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.__P__cards article { position: relative; padding-bottom: 18px; border-radius: 12px; overflow: hidden; background: #120c33; border: 1px solid hsla(var(--h), 70%, 60%, .2); transition: transform .25s, box-shadow .25s; }
+.__P__cards article:hover { transform: translateY(-4px); box-shadow: 0 20px 40px -10px hsla(var(--h2), 90%, 55%, .45); }
+.__P__cards img { display: block; width: 100%; height: auto; }
+.__P__cards h3 { margin: 14px 18px 2px; font-size: 20px; }
+.__P__cards p { margin: 0 18px; color: var(--muted); font-size: 14px; }
+.__P__score { position: absolute; top: 12px; right: 12px; padding: 3px 9px; border-radius: 4px; background: rgba(7, 4, 26, .8); color: #ffd166; font-size: 13px; font-weight: 700; }
+.__P__news ul { margin: 0; padding: 0; list-style: none; }
+.__P__news li { display: flex; gap: 24px; padding: 16px 0; border-bottom: 1px solid rgba(255, 255, 255, .08); }
+.__P__news time { flex: 0 0 140px; color: var(--neon-2); font-weight: 700; font-size: 14px; }
+.__P__jobs p { max-width: 640px; color: var(--muted); }
+.__P__mail { font-size: 26px; color: var(--neon) !important; text-shadow: 0 0 16px hsla(var(--h2), 90%, 60%, .5); }
+.__P__footer { margin-top: 60px; padding: 30px 40px; text-align: center; font-size: 13px; color: var(--muted); border-top: 1px solid rgba(255, 255, 255, .08); }
+@media (max-width: 860px) {
+  .__P__cards { grid-template-columns: 1fr; }
+  .__P__nav nav { display: none; }
+  .__P__nav, .__P__hero-copy, .__P__games, .__P__news, .__P__jobs { padding-left: 20px; padding-right: 20px; }
+  .__P__news li { flex-direction: column; gap: 4px; }
+}

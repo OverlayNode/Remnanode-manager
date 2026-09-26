@@ -1,37 +1,67 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Remnawave Node Manager
-# Generic bootstrap/management script for Ubuntu/Debian Remnawave nodes.
+# RemnaNode Manager — монолитный скрипт установки и администрирования Remnawave Node.
 #
-# Features:
-# - RemnaNode install/update/remove
-# - Docker + UFW bootstrap
-# - acme.sh SSL issuance/renewal
-# - Nginx selfsteal via /dev/shm/nginx.sock
-# - Generic cloud landing page (no credential submission)
-# - VLESS RAW + REALITY
-# - VLESS XHTTP + REALITY
-# - Hysteria2 (Xray "hysteria", version 2)
-# - diagnostics and generated Remnawave Xray profile
+# Запуск без установки:
+#   bash <(curl -Ls https://raw.githubusercontent.com/OverlayNode/Remnanode-manager/main/install.sh)
 #
-# Run as root.
+# Возможности:
+# - RemnaNode (Docker) без Selfsteal, с Selfsteal, Selfsteal для уже установленной Node
+# - управление версией Node: обновление, выбор тега, откат по digest
+# - сайты-заглушки из каталога шаблонов с уникальным отпечатком при каждом деплое
+# - Reality (RAW / XHTTP), Hysteria2, SSL через acme.sh
+# - routing: roscomvpn geosite/geoip, RU/whitelist, блокировка торрентов
+# - модули: WARP, Psiphon, Tor, Zapret2
+# - мониторинг и администрирование сервера
+# - Remnawave Panel API: обновление Config Profile с diff и backup
+#
+# Запускать от root. Поддерживаются Ubuntu и Debian.
 
-SCRIPT_VERSION="3.0.0"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_VERSION="4.1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
 APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-600}"
 
-REMNAWAVE_IMAGE="${REMNAWAVE_IMAGE:-remnawave/node:latest}"
+RNM_REPO="${RNM_REPO:-OverlayNode/Remnanode-manager}"
+RNM_REF="${RNM_REF:-main}"
+RNM_RAW_URL="https://raw.githubusercontent.com/${RNM_REPO}/${RNM_REF}"
+RNM_LIB_DIR="/usr/local/lib/remnanode/modules"
+# shellcheck disable=SC2034 # используется модулем admin и тестами
+RNM_MODULES="sites routing panel warp psiphon tor zapret monitor admin"
+
+NODE_IMAGE_REPO="remnawave/node"
+REMNAWAVE_IMAGE="${REMNAWAVE_IMAGE:-${NODE_IMAGE_REPO}:latest}"
 NGINX_IMAGE="${NGINX_IMAGE:-nginx:alpine}"
 
 BASE_DIR="/opt/remnanode"
 STATE_FILE="${BASE_DIR}/installer.conf"
 REALITY_FILE="${BASE_DIR}/reality.env"
+PANEL_ENV_FILE="${BASE_DIR}/panel.env"
 UFW_STATE_FILE="${BASE_DIR}/ufw.rules"
 NODE_COMPOSE_FILE="${BASE_DIR}/docker-compose.yml"
 PROFILE_DIR="${BASE_DIR}/profiles"
 PROFILE_FILE="${PROFILE_DIR}/xray-profile.json"
 PROFILE_INFO="${PROFILE_DIR}/profile-info.txt"
+CLIENT_ROUTING_FILE="${PROFILE_DIR}/client-routing-happ.json"
+CLIENT_RULES_FILE="${PROFILE_DIR}/client-routing-xray-rules.json"
+CLIENT_DNS_FILE="${PROFILE_DIR}/client-dns-xray.json"
+CLIENT_APPS_FILE="${PROFILE_DIR}/client-ru-apps.txt"
+GEO_DIR="${BASE_DIR}/geo"
+ROUTING_DIR="${BASE_DIR}/routing"
+BACKUP_DIR="${BASE_DIR}/backups"
+# shellcheck disable=SC2034 # используется модулем sites
+CACHE_DIR="${BASE_DIR}/.cache"
+RUNTIME_CACHE="/run/remnanode-manager"
+
+GEO_UPDATER="/usr/local/sbin/remnanode-geo-update"
+GEO_SITE_FILE="roscom-geosite.dat"
+GEO_IP_FILE="roscom-geoip.dat"
+GEO_SITE_URL="${GEO_SITE_URL:-https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat}"
+GEO_IP_URL="${GEO_IP_URL:-https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat}"
+XRAY_ASSET_DIR="/usr/local/share/xray"
+
+WARP_INSTALL_URL="${WARP_INSTALL_URL:-https://raw.githubusercontent.com/Chara-Freedom/vps-warp/main/warp_install.sh}"
+PSIPHON_INSTALL_URL="${PSIPHON_INSTALL_URL:-https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/main/psiphon_install.sh}"
 
 NODE_PORT="2222"
 NODE_SERVICE_NAME="remnanode"
@@ -49,14 +79,20 @@ C_GREEN='\033[0;32m'
 C_YELLOW='\033[0;33m'
 C_BLUE='\033[0;34m'
 C_CYAN='\033[0;36m'
+C_GRAY='\033[0;90m'
 C_BOLD='\033[1m'
 
-# Runtime defaults. State file overrides these when it exists.
+# Значения по умолчанию. Файл состояния переопределяет их, если существует.
 INSTALL_MODE=""
 DOMAIN=""
 SERVICE_NAME=""
 ACME_EMAIL=""
 PANEL_IP=""
+SECRET_KEY=""
+
+NODE_IMAGE="$REMNAWAVE_IMAGE"
+NODE_PREV_IMAGE=""
+SITE_TEMPLATE=""
 
 RAW_ENABLED="0"
 RAW_PORT="443"
@@ -69,6 +105,21 @@ XHTTP_PATH=""
 HY2_ENABLED="0"
 HY2_PORT="443"
 
+# Routing.
+GEO_ENABLED="0"
+RU_POLICY="block"        # block | direct | warp
+BLOCK_ADS="0"
+WARP_OUTBOUND="0"
+PSIPHON_OUTBOUND="0"
+PSIPHON_ADDR="127.0.0.1"
+PSIPHON_PORT="1080"
+TOR_OUTBOUND="0"
+# DNS: РФ-домены — через РФ-резолверы, остальное — через зарубежный DoH.
+DNS_RU="77.88.8.8,77.88.8.1"
+DNS_FOREIGN="https://1.1.1.1/dns-query,https://8.8.8.8/dns-query"
+DNS_HIJACK="1"           # перехват клиентского DNS (порт 53) внутри туннеля
+PANEL_PROFILE_UUID=""
+
 REALITY_PRIVATE_KEY=""
 REALITY_PUBLIC_KEY=""
 RAW_SHORT_ID=""
@@ -77,7 +128,7 @@ RAW_SHORT_IDS_JSON=""
 XHTTP_SHORT_IDS_JSON=""
 
 log() {
-  printf '%b\n' "$*" | tee -a "$INSTALL_LOG"
+  printf '%b\n' "$*" | tee -a "$INSTALL_LOG" 2>/dev/null || printf '%b\n' "$*"
 }
 
 info() { log "${C_BLUE}[INFO]${C_RESET} $*"; }
@@ -109,13 +160,13 @@ detect_os() {
 
 pause() {
   echo
-  read -r -p "Нажми Enter для продолжения..." _
+  read -r -p "Нажми Enter для продолжения..." _ || true
 }
 
 confirm() {
   local prompt="${1:-Продолжить?}"
   local answer
-  read -r -p "$prompt [Y/n]: " answer
+  read -r -p "$prompt [Y/n]: " answer || return 1
   case "${answer:-Y}" in
     Y|y|YES|yes|Yes|Д|д) return 0 ;;
     *) return 1 ;;
@@ -125,11 +176,22 @@ confirm() {
 confirm_no_default() {
   local prompt="${1:-Продолжить?}"
   local answer
-  read -r -p "$prompt [y/N]: " answer
+  read -r -p "$prompt [y/N]: " answer || return 1
   case "${answer:-N}" in
     Y|y|YES|yes|Yes|Д|д) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Запускает действие меню в subshell: die внутри действия возвращает в меню,
+# а не завершает весь скрипт.
+run_action() {
+  local status=0
+  ( "$@" ) || status=$?
+  if ((status != 0)); then
+    warn "Действие завершилось с ошибкой (код ${status}). Подробности: ${INSTALL_LOG}"
+  fi
+  return 0
 }
 
 is_selfsteal_mode() {
@@ -187,12 +249,13 @@ PY
       return 0
     else
       status=$?
-      # 126/127 means that a command alias exists but cannot be executed.
-      ((status == 126 || status == 127)) || return "$status"
+      # Код 1 — адрес некорректен. Любой другой код значит, что python3
+      # не смог выполниться (126/127, заглушки и т. п.) — используем fallback.
+      ((status != 1)) || return 1
     fi
   fi
 
-  # Conservative fallback for minimal systems before python3 is installed.
+  # Консервативный fallback для минимальных систем до установки python3.
   local prefix="128"
   local address="${value%/*}"
   [[ "$value" == */* ]] && prefix="${value##*/}"
@@ -202,13 +265,44 @@ PY
 
 validate_service_name() {
   local value="$1"
-  # Deliberately restrictive because the value is written to HTML.
+  # Намеренно строго: значение пишется в HTML и в sed-подстановки.
   [[ "$value" =~ ^[[:alnum:]][[:alnum:]\ ._-]{0,79}$ ]]
 }
 
 validate_xhttp_path() {
   local value="$1"
   [[ "$value" =~ ^/[A-Za-z0-9._~:/@%+,-]{1,180}$ ]]
+}
+
+# DNS-сервер Xray: IP, https://…/dns-query (DoH), tcp://IP[:порт] или localhost.
+validate_dns_server() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && return 0
+  [[ "$value" =~ ^[0-9A-Fa-f]*:[0-9A-Fa-f:]+$ ]] && return 0
+  [[ "$value" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]] && return 0
+  [[ "$value" =~ ^tcp://[0-9A-Za-z.:-]+$ ]] && return 0
+  [[ "$value" == "localhost" ]]
+}
+
+validate_dns_list() {
+  local list="$1" item
+  [[ -n "$list" ]] || return 1
+  local -a items=()
+  IFS=, read -r -a items <<<"$list"
+  ((${#items[@]} > 0)) || return 1
+  for item in "${items[@]}"; do
+    validate_dns_server "$item" || return 1
+  done
+}
+
+validate_image_tag() {
+  local value="$1"
+  [[ "$value" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
+}
+
+validate_image_ref() {
+  local value="$1"
+  [[ "$value" =~ ^[a-z0-9./_-]+(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})$ ]]
 }
 
 backup_file() {
@@ -245,6 +339,10 @@ save_state() {
     printf 'ADDED_SSL_VOLUME=%q\n' "$ADDED_SSL_VOLUME"
     printf 'ADDED_NGINX_DEPENDENCY=%q\n' "$ADDED_NGINX_DEPENDENCY"
 
+    printf 'NODE_IMAGE=%q\n' "$NODE_IMAGE"
+    printf 'NODE_PREV_IMAGE=%q\n' "$NODE_PREV_IMAGE"
+    printf 'SITE_TEMPLATE=%q\n' "$SITE_TEMPLATE"
+
     printf 'RAW_ENABLED=%q\n' "$RAW_ENABLED"
     printf 'RAW_PORT=%q\n' "$RAW_PORT"
 
@@ -255,6 +353,19 @@ save_state() {
 
     printf 'HY2_ENABLED=%q\n' "$HY2_ENABLED"
     printf 'HY2_PORT=%q\n' "$HY2_PORT"
+
+    printf 'GEO_ENABLED=%q\n' "$GEO_ENABLED"
+    printf 'RU_POLICY=%q\n' "$RU_POLICY"
+    printf 'BLOCK_ADS=%q\n' "$BLOCK_ADS"
+    printf 'WARP_OUTBOUND=%q\n' "$WARP_OUTBOUND"
+    printf 'PSIPHON_OUTBOUND=%q\n' "$PSIPHON_OUTBOUND"
+    printf 'PSIPHON_ADDR=%q\n' "$PSIPHON_ADDR"
+    printf 'PSIPHON_PORT=%q\n' "$PSIPHON_PORT"
+    printf 'TOR_OUTBOUND=%q\n' "$TOR_OUTBOUND"
+    printf 'DNS_RU=%q\n' "$DNS_RU"
+    printf 'DNS_FOREIGN=%q\n' "$DNS_FOREIGN"
+    printf 'DNS_HIJACK=%q\n' "$DNS_HIJACK"
+    printf 'PANEL_PROFILE_UUID=%q\n' "$PANEL_PROFILE_UUID"
   } > "$tmp_file"
 
   chmod 600 "$tmp_file"
@@ -268,8 +379,9 @@ load_state() {
     # shellcheck disable=SC1090
     source "$STATE_FILE"
   fi
-  # Older state files stored SCRIPT_VERSION. The running script version wins.
+  # Старые файлы состояния хранили SCRIPT_VERSION. Версия запущенного скрипта важнее.
   SCRIPT_VERSION="$running_version"
+  [[ -n "${NODE_IMAGE:-}" ]] || NODE_IMAGE="$REMNAWAVE_IMAGE"
 }
 
 save_reality() {
@@ -302,10 +414,11 @@ ensure_base_dirs() {
     "$BASE_DIR" \
     "${BASE_DIR}/ssl" \
     "${BASE_DIR}/html" \
-    "$PROFILE_DIR"
+    "$PROFILE_DIR" \
+    "$BACKUP_DIR"
 
   chmod 755 "$BASE_DIR" "${BASE_DIR}/html" "$PROFILE_DIR"
-  chmod 700 "${BASE_DIR}/ssl"
+  chmod 700 "${BASE_DIR}/ssl" "$BACKUP_DIR"
 }
 
 apt_lock_is_held() {
@@ -341,11 +454,26 @@ install_base_packages() {
     iproute2 \
     jq \
     tmux \
+    psmisc \
     python3-minimal \
     python3-yaml
 
   systemctl enable --now cron >/dev/null 2>&1 || true
   ok "Базовые пакеты установлены."
+}
+
+# Мягкая версия: доустанавливает только отсутствующие утилиты для меню и мониторинга.
+ensure_runtime_tools() {
+  local -a missing=()
+  command -v jq >/dev/null 2>&1 || missing+=(jq)
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v openssl >/dev/null 2>&1 || missing+=(openssl)
+  command -v ss >/dev/null 2>&1 || missing+=(iproute2)
+  ((${#missing[@]} == 0)) && return 0
+  info "Доустанавливаю: ${missing[*]}"
+  export DEBIAN_FRONTEND=noninteractive
+  apt_get_wait update -y >/dev/null
+  apt_get_wait install -y "${missing[@]}" >/dev/null
 }
 
 install_docker() {
@@ -359,31 +487,17 @@ install_docker() {
 
   install -m 0755 -d /etc/apt/keyrings
 
-  if [[ "$OS_ID" == "ubuntu" ]]; then
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-      -o /etc/apt/keyrings/docker.asc
+  curl -fsSL "https://download.docker.com/linux/${OS_ID}/gpg" \
+    -o /etc/apt/keyrings/docker.asc
 
-    cat > /etc/apt/sources.list.d/docker.sources <<EOF
+  cat > /etc/apt/sources.list.d/docker.sources <<EOF
 Types: deb
-URIs: https://download.docker.com/linux/ubuntu
+URIs: https://download.docker.com/linux/${OS_ID}
 Suites: ${OS_CODENAME}
 Components: stable
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
-  else
-    curl -fsSL https://download.docker.com/linux/debian/gpg \
-      -o /etc/apt/keyrings/docker.asc
-
-    cat > /etc/apt/sources.list.d/docker.sources <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/debian
-Suites: ${OS_CODENAME}
-Components: stable
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF
-  fi
 
   chmod a+r /etc/apt/keyrings/docker.asc
 
@@ -400,6 +514,38 @@ EOF
   ok "Docker установлен."
 }
 
+secure_random_int() {
+  local minimum="$1" maximum="$2" value span
+  value=$((16#$(openssl rand -hex 4)))
+  span=$((maximum - minimum + 1))
+  printf '%d' "$((minimum + value % span))"
+}
+
+random_hex() {
+  openssl rand -hex "${1:-4}"
+}
+
+# Выбирает случайный элемент из аргументов.
+random_pick() {
+  local -a items=("$@")
+  local index
+  index="$(secure_random_int 0 $((${#items[@]} - 1)))"
+  printf '%s' "${items[$index]}"
+}
+
+human_bytes() {
+  local bytes="${1:-0}"
+  awk -v b="$bytes" 'BEGIN {
+    split("B KB MB GB TB PB", u, " "); i = 1;
+    while (b >= 1024 && i < 6) { b /= 1024; i++ }
+    if (i <= 3) printf "%d %s", b + 0.5, u[i]; else printf "%.1f %s", b, u[i]
+  }' | sed -E 's/\.0 / /'
+}
+
+# ---------------------------------------------------------------------------
+# Firewall и порты
+# ---------------------------------------------------------------------------
+
 prompt_secret_and_panel() {
   echo
   read -r -s -p "SECRET_KEY из Remnawave Panel: " SECRET_KEY
@@ -409,11 +555,15 @@ prompt_secret_and_panel() {
   [[ "$SECRET_KEY" =~ ^[A-Za-z0-9._=-]+$ ]] \
     || die "SECRET_KEY содержит неподдерживаемые символы."
 
+  local port_input
+  read -r -p "NODE_PORT (порт API ноды для панели) [${NODE_PORT}]: " port_input
+  NODE_PORT="${port_input:-$NODE_PORT}"
+  validate_port "$NODE_PORT" || die "Некорректный NODE_PORT: ${NODE_PORT}"
+
   prompt_panel_network
 }
 
 prompt_panel_network() {
-
   read -r -p "IP/CIDR сервера панели для ${NODE_PORT}/tcp (Enter = открыть всем): " PANEL_IP
 
   validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
@@ -491,7 +641,7 @@ configure_firewall() {
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
 
-  # User requested OpenSSH/22 to remain reachable.
+  # OpenSSH/22 остаётся доступным всегда, текущий порт sshd — тоже.
   ufw allow 22/tcp >/dev/null
 
   if [[ "$ssh_port" != "22" ]]; then
@@ -506,7 +656,7 @@ configure_firewall() {
   fi
 
   if [[ "$mode" != "basic" ]]; then
-    # HTTP-01 for acme.sh renewal.
+    # HTTP-01 для выпуска и renew acme.sh.
     managed_rules+=("allow 80/tcp")
 
     if [[ "$RAW_ENABLED" == "1" ]]; then
@@ -592,6 +742,10 @@ ensure_fresh_install_target() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+
 write_basic_compose() {
   local compose_file="$NODE_COMPOSE_FILE"
   local tmp_file
@@ -602,7 +756,7 @@ services:
   remnanode:
     container_name: remnanode
     hostname: remnanode
-    image: ${REMNAWAVE_IMAGE}
+    image: ${NODE_IMAGE}
     network_mode: host
     restart: always
 
@@ -631,6 +785,7 @@ EOF
   docker compose -f "$tmp_file" config >/dev/null
   backup_file "$compose_file"
   mv -f "$tmp_file" "$compose_file"
+  chmod 600 "$compose_file"
 }
 
 write_selfsteal_compose() {
@@ -674,7 +829,7 @@ services:
   remnanode:
     container_name: remnanode
     hostname: remnanode
-    image: ${REMNAWAVE_IMAGE}
+    image: ${NODE_IMAGE}
     network_mode: host
     restart: always
 
@@ -698,7 +853,7 @@ services:
 
     volumes:
       - /dev/shm:/dev/shm:rw
-      # Makes the node-local certificate available to Xray/Hysteria2.
+      # Сертификат ноды для Xray/Hysteria2.
       - /opt/remnanode/ssl:/opt/remnanode/ssl:ro
 
     environment:
@@ -706,10 +861,10 @@ services:
       SECRET_KEY: '${SECRET_KEY}'
 EOF
 
-
   docker compose -f "$tmp_file" config >/dev/null
   backup_file "$compose_file"
   mv -f "$tmp_file" "$compose_file"
+  chmod 600 "$compose_file"
 }
 
 detect_existing_compose() {
@@ -750,11 +905,19 @@ detect_existing_compose() {
     validate_port "$existing_node_port" || die "У существующей Node некорректный NODE_PORT: ${existing_node_port}"
     NODE_PORT="$existing_node_port"
   fi
+
+  NODE_IMAGE="$(compose_node_image 2>/dev/null || printf '%s' "$REMNAWAVE_IMAGE")"
 }
 
-update_existing_compose() {
+# Безопасное редактирование Compose через PyYAML.
+# Действия: selfsteal-add, selfsteal-remove, geo-add, geo-remove, set-image.
+compose_edit() {
   local action="$1"
+  local argument="${2:-}"
   local tmp_file metadata
+  command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null \
+    || die "Нужны python3 и python3-yaml (apt install python3-yaml)."
+
   tmp_file="$(mktemp "${NODE_COMPOSE_FILE}.tmp.XXXXXX")"
 
   if ! metadata="$(python3 - \
@@ -765,14 +928,18 @@ update_existing_compose() {
     "$NGINX_IMAGE" \
     "$ADDED_SHM_VOLUME" \
     "$ADDED_SSL_VOLUME" \
-    "$ADDED_NGINX_DEPENDENCY" <<'PY'
+    "$ADDED_NGINX_DEPENDENCY" \
+    "$argument" \
+    "$XRAY_ASSET_DIR" \
+    "$GEO_SITE_FILE" \
+    "$GEO_IP_FILE" <<'PY'
 import sys
-from pathlib import Path
 
 import yaml
 
-source, output, action, node_name, nginx_image = sys.argv[1:6]
-remove_shm, remove_ssl, remove_dependency = sys.argv[6:9]
+(source, output, action, node_name, nginx_image,
+ remove_shm, remove_ssl, remove_dependency, argument,
+ asset_dir, geo_site, geo_ip) = sys.argv[1:13]
 
 with open(source, "r", encoding="utf-8") as stream:
     document = yaml.safe_load(stream) or {}
@@ -785,7 +952,6 @@ node = services.get(node_name)
 if not isinstance(node, dict):
     raise SystemExit(f"Compose-сервис {node_name} не найден.")
 
-
 def volume_parts(entry):
     if isinstance(entry, str):
         parts = entry.split(":", 2)
@@ -794,7 +960,6 @@ def volume_parts(entry):
     elif isinstance(entry, dict):
         return entry.get("source"), entry.get("target")
     return None, None
-
 
 def ensure_volume(volumes, source_path, target_path, read_only=False):
     for entry in volumes:
@@ -816,7 +981,6 @@ def ensure_volume(volumes, source_path, target_path, read_only=False):
     volumes.append(volume)
     return True
 
-
 def remove_volume(volumes, source_path, target_path):
     result = []
     for entry in volumes:
@@ -826,15 +990,19 @@ def remove_volume(volumes, source_path, target_path):
         result.append(entry)
     return result
 
-
-if action == "add":
-    if "nginx-selfsteal" in services:
-        raise SystemExit("Сервис nginx-selfsteal уже существует в Compose-файле.")
-
+def node_volumes():
     volumes = node.setdefault("volumes", [])
     if not isinstance(volumes, list):
         raise SystemExit("Секция volumes сервиса Node должна быть списком.")
+    return volumes
 
+result = ""
+
+if action == "selfsteal-add":
+    if "nginx-selfsteal" in services:
+        raise SystemExit("Сервис nginx-selfsteal уже существует в Compose-файле.")
+
+    volumes = node_volumes()
     added_shm = ensure_volume(volumes, "/dev/shm", "/dev/shm")
     added_ssl = ensure_volume(
         volumes, "/opt/remnanode/ssl", "/opt/remnanode/ssl", read_only=True
@@ -891,9 +1059,9 @@ if action == "add":
             "start_period": "3s",
         },
     }
-    print(int(added_shm), int(added_ssl), int(added_dependency))
+    result = f"{int(added_shm)} {int(added_ssl)} {int(added_dependency)}"
 
-elif action == "remove":
+elif action == "selfsteal-remove":
     services.pop("nginx-selfsteal", None)
 
     if remove_dependency == "1":
@@ -919,15 +1087,43 @@ elif action == "remove":
             node["volumes"] = volumes
         else:
             node.pop("volumes", None)
+
+elif action in ("geo-add", "geo-remove"):
+    geo_dir = argument
+    pairs = [
+        (f"{geo_dir}/{geo_site}", f"{asset_dir}/{geo_site}"),
+        (f"{geo_dir}/{geo_ip}", f"{asset_dir}/{geo_ip}"),
+    ]
+    if action == "geo-add":
+        volumes = node_volumes()
+        for host_path, container_path in pairs:
+            ensure_volume(volumes, host_path, container_path, read_only=True)
+    else:
+        volumes = node.get("volumes")
+        if isinstance(volumes, list):
+            for host_path, container_path in pairs:
+                volumes = remove_volume(volumes, host_path, container_path)
+            if volumes:
+                node["volumes"] = volumes
+            else:
+                node.pop("volumes", None)
+
+elif action == "set-image":
+    if not argument:
+        raise SystemExit("Не указан image.")
+    node["image"] = argument
+
 else:
     raise SystemExit(f"Неизвестное действие: {action}")
 
 with open(output, "w", encoding="utf-8", newline="\n") as stream:
     yaml.safe_dump(document, stream, sort_keys=False, allow_unicode=True)
+
+print(result)
 PY
   )"; then
     rm -f "$tmp_file"
-    die "Не удалось изменить существующий Compose-файл."
+    die "Не удалось изменить Compose-файл (${action})."
   fi
 
   docker compose -f "$tmp_file" config >/dev/null \
@@ -941,10 +1137,70 @@ PY
   backup_file "$NODE_COMPOSE_FILE"
   mv -f "$tmp_file" "$NODE_COMPOSE_FILE"
 
-  if [[ "$action" == "add" ]]; then
+  if [[ "$action" == "selfsteal-add" ]]; then
     read -r ADDED_SHM_VOLUME ADDED_SSL_VOLUME ADDED_NGINX_DEPENDENCY <<< "$metadata"
   fi
 }
+
+# Совместимость со старым именем функции.
+update_existing_compose() {
+  case "$1" in
+    add) compose_edit selfsteal-add ;;
+    remove) compose_edit selfsteal-remove ;;
+    *) die "Неизвестное действие: $1" ;;
+  esac
+}
+
+compose_node_image() {
+  [[ -f "$NODE_COMPOSE_FILE" ]] || return 1
+  docker compose -f "$NODE_COMPOSE_FILE" config --format json 2>/dev/null \
+    | jq -r --arg service "$NODE_SERVICE_NAME" '.services[$service].image // empty'
+}
+
+manager_compose() {
+  docker compose -f "$NODE_COMPOSE_FILE" "$@"
+}
+
+start_stack() {
+  manager_compose config >/dev/null
+  manager_compose pull
+  manager_compose up -d --remove-orphans
+}
+
+verify_basic() {
+  echo
+  info "Проверка RemnaNode..."
+  manager_compose ps
+
+  local state=""
+  for _ in {1..15}; do
+    state="$(docker inspect remnanode --format '{{.State.Status}}' 2>/dev/null || true)"
+    [[ "$state" == "running" ]] && break
+    sleep 2
+  done
+
+  [[ "$state" == "running" ]] || die "Контейнер remnanode не перешёл в состояние running."
+  ok "Контейнер remnanode запущен."
+
+  local listening=0
+  for _ in {1..10}; do
+    if ss -H -lnt "( sport = :${NODE_PORT} )" 2>/dev/null | grep -q .; then
+      listening=1
+      break
+    fi
+    sleep 2
+  done
+
+  if ((listening)); then
+    ok "Node API слушает TCP ${NODE_PORT}."
+  else
+    warn "TCP ${NODE_PORT} пока не виден. Проверь docker logs remnanode."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Nginx Selfsteal
+# ---------------------------------------------------------------------------
 
 write_nginx_conf() {
   local domain="$1"
@@ -954,6 +1210,7 @@ write_nginx_conf() {
 
   cat > "$tmp_file" <<EOF
 server_names_hash_bucket_size 64;
+server_tokens off;
 
 ssl_protocols TLSv1.2 TLSv1.3;
 ssl_ecdh_curve X25519:prime256v1:secp384r1;
@@ -963,6 +1220,7 @@ ssl_session_tickets off;
 
 server {
     listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
+    http2 on;
 
     server_name ${domain};
 
@@ -973,14 +1231,24 @@ server {
     root /var/www/html;
     index index.html;
 
+    gzip on;
+    gzip_types text/css application/javascript image/svg+xml application/json;
+
     add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Frame-Options "DENY" always;
-    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; frame-ancestors 'none'; form-action 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'" always;
 
     location / {
-        try_files \$uri \$uri/ /index.html;
+        try_files \$uri \$uri/ =404;
+    }
+
+    location ~* \.(css|js|svg|png|jpg|jpeg|webp|ico|woff2)$ {
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        try_files \$uri =404;
     }
 
     location = /robots.txt {
@@ -991,10 +1259,13 @@ server {
         default_type text/plain;
         return 200 "ok\\n";
     }
+
+    error_page 404 /404.html;
 }
 
 server {
     listen unix:/dev/shm/nginx.sock ssl proxy_protocol default_server;
+    http2 on;
 
     server_name _;
 
@@ -1008,280 +1279,41 @@ EOF
   mv -f "$tmp_file" "$nginx_file"
 }
 
-write_site_files() {
-  local domain="$1"
-  local service_name="$2"
-  local current_year
-  local output_dir backup_dir
-  current_year="$(date +%Y)"
-  output_dir="$(mktemp -d "${BASE_DIR}/html.tmp.XXXXXX")"
+verify_selfsteal_local() {
+  docker inspect nginx-selfsteal >/dev/null 2>&1 || {
+    warn "nginx-selfsteal не запущен."
+    return 1
+  }
 
-  cat > "${output_dir}/index.html" <<EOF
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="robots" content="noindex,nofollow,noarchive">
-  <meta name="theme-color" content="#f4f7fb">
-  <title>${service_name} Cloud</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <div class="ambient ambient-a"></div>
-  <div class="ambient ambient-b"></div>
+  docker exec nginx-selfsteal nginx -t
 
-  <header class="topbar">
-    <a class="brand" href="/" aria-label="${service_name} Cloud">
-      <span class="brandmark" aria-hidden="true">
-        <svg viewBox="0 0 32 32"><path d="M9.25 23.75h13.6a5.4 5.4 0 0 0 .5-10.77A7.85 7.85 0 0 0 8.5 10.6a6.55 6.55 0 0 0 .75 13.15Z"/></svg>
-      </span>
-      <span class="brandcopy">
-        <strong>${service_name}</strong>
-        <small>Cloud</small>
-      </span>
-    </a>
+  local health=""
+  for _ in {1..12}; do
+    health="$(docker inspect nginx-selfsteal --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')"
+    [[ "$health" == "healthy" ]] && break
+    sleep 2
+  done
+  [[ "$health" == "healthy" ]] || die "nginx-selfsteal не прошёл healthcheck: ${health}."
 
-    <div class="service-status">
-      <span class="status-dot"></span>
-      All systems operational
-    </div>
-  </header>
+  test -S /dev/shm/nginx.sock || die "Не найден /dev/shm/nginx.sock на хосте."
 
-  <main class="layout">
-    <section class="hero">
-      <span class="eyebrow">SECURE CLOUD WORKSPACE</span>
-      <h1>One secure place<br>for your work.</h1>
-      <p class="lead">Access private applications, files and managed cloud resources through a protected workspace.</p>
+  docker exec remnanode test -S /dev/shm/nginx.sock \
+    || die "RemnaNode не видит /dev/shm/nginx.sock."
 
-      <div class="gateway-pill">
-        <span>Gateway</span>
-        <strong>${domain}</strong>
-      </div>
+  ok "Nginx и Unix socket работают."
+}
 
-      <div class="benefits">
-        <article>
-          <span class="check">✓</span>
-          <div><strong>Protected session</strong><small>Encrypted connection to private resources</small></div>
-        </article>
-        <article>
-          <span class="check">✓</span>
-          <div><strong>Managed access</strong><small>Workspace access for authorized users</small></div>
-        </article>
-        <article>
-          <span class="check">✓</span>
-          <div><strong>Distributed infrastructure</strong><small>Reliable regional cloud gateways</small></div>
-        </article>
-      </div>
-    </section>
-
-    <section class="auth-card" aria-label="Gateway status">
-      <div class="card-head">
-        <div class="cloud-icon" aria-hidden="true">
-          <svg viewBox="0 0 48 48"><path d="M14 35h21a8 8 0 0 0 .8-15.96A12 12 0 0 0 13 15.5 10 10 0 0 0 14 35Z"/></svg>
-        </div>
-        <h2>Gateway online</h2>
-        <p>${service_name} Cloud</p>
-      </div>
-
-      <div class="notice visible" role="status">
-        <span class="notice-icon">✓</span>
-        <div>
-          <strong>Secure endpoint is available</strong>
-          <p>This page is a service endpoint. No interactive sign-in is required.</p>
-        </div>
-      </div>
-
-      <div class="card-footer">
-        <span>${domain}</span>
-        <span class="sep">•</span>
-        <span>Secure Cloud Gateway</span>
-      </div>
-    </section>
-  </main>
-
-  <footer class="footer">
-    <span>© ${current_year} ${service_name} Cloud</span>
-    <nav><span>Security</span><span>Privacy</span><span>Status</span></nav>
-  </footer>
-
-</body>
-</html>
-EOF
-
-  cat > "${output_dir}/style.css" <<'EOF'
-:root {
-  color-scheme: light;
-  --ink: #101828;
-  --muted: #667085;
-  --faint: #98a2b3;
-  --line: #e4e7ec;
-  --blue: #315fde;
-  --blue-2: #5c82ef;
-  --surface: rgba(255,255,255,.80);
-  --shadow: 0 30px 80px rgba(16,24,40,.10);
-}
-* { box-sizing: border-box; }
-html, body { margin: 0; min-height: 100%; }
-body {
-  min-height: 100vh;
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-  color: var(--ink);
-  background: linear-gradient(135deg,#f5f7fb 0%,#edf3fb 52%,#f8fafc 100%);
-  display: flex;
-  flex-direction: column;
-  overflow-x: hidden;
-}
-.ambient { position: fixed; border-radius: 50%; filter: blur(22px); pointer-events: none; z-index: 0; }
-.ambient-a {
-  width: 560px; height: 560px; left: -220px; top: -260px;
-  background: radial-gradient(circle,rgba(64,112,245,.20),rgba(64,112,245,0) 70%);
-}
-.ambient-b {
-  width: 650px; height: 650px; right: -260px; bottom: -330px;
-  background: radial-gradient(circle,rgba(85,115,220,.14),rgba(85,115,220,0) 70%);
-}
-.topbar {
-  position: relative; z-index: 2; min-height: 78px; padding: 0 42px;
-  display: flex; align-items: center; justify-content: space-between;
-}
-.brand { display: flex; align-items: center; gap: 11px; color: inherit; text-decoration: none; }
-.brandmark {
-  width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
-  background: #111827; box-shadow: 0 8px 20px rgba(17,24,39,.12);
-}
-.brandmark svg { width: 24px; fill: none; stroke: #fff; stroke-width: 1.7; }
-.brandcopy { display: grid; line-height: 1.05; }
-.brandcopy strong { font-size: 15px; letter-spacing: -.2px; }
-.brandcopy small { margin-top: 4px; font-size: 11px; color: var(--muted); }
-.service-status {
-  display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #475467;
-  border: 1px solid rgba(16,24,40,.08); background: rgba(255,255,255,.58);
-  padding: 8px 12px; border-radius: 999px; backdrop-filter: blur(14px);
-}
-.status-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: #12b76a;
-  box-shadow: 0 0 0 3px rgba(18,183,106,.10);
-}
-.layout {
-  position: relative; z-index: 1; width: 100%; max-width: 1120px; margin: auto;
-  padding: 58px 38px 92px; display: grid; grid-template-columns: minmax(0,1fr) 420px;
-  gap: 105px; align-items: center;
-}
-.eyebrow {
-  display: inline-flex; padding: 7px 11px; border-radius: 8px;
-  background: rgba(49,95,222,.07); color: #3456c5; font-size: 11px;
-  font-weight: 750; letter-spacing: .85px;
-}
-.hero h1 {
-  margin: 20px 0 20px; max-width: 600px; font-size: clamp(42px,5vw,64px);
-  line-height: 1.02; letter-spacing: -3px; font-weight: 720;
-}
-.lead { max-width: 520px; margin: 0; color: var(--muted); font-size: 17px; line-height: 1.68; }
-.gateway-pill {
-  width: fit-content; margin-top: 24px; padding: 9px 12px;
-  border: 1px solid rgba(16,24,40,.08); border-radius: 10px;
-  background: rgba(255,255,255,.58); font-size: 11px; color: var(--muted);
-}
-.gateway-pill span { margin-right: 8px; }
-.gateway-pill strong { color: #344054; font-weight: 650; }
-.benefits { margin-top: 34px; display: grid; gap: 18px; }
-.benefits article { display: flex; align-items: flex-start; gap: 12px; }
-.check {
-  width: 24px; height: 24px; flex: 0 0 24px; display: grid; place-items: center;
-  border-radius: 50%; color: #4169e1; background: #e8efff; font-size: 12px; font-weight: 800;
-}
-.benefits strong, .benefits small { display: block; }
-.benefits strong { font-size: 13px; color: #344054; }
-.benefits small { margin-top: 4px; font-size: 12px; color: var(--faint); }
-.auth-card {
-  padding: 34px; border-radius: 23px; border: 1px solid rgba(16,24,40,.08);
-  background: var(--surface); box-shadow: var(--shadow); backdrop-filter: blur(22px);
-}
-.cloud-icon {
-  width: 48px; height: 48px; margin-bottom: 20px; border-radius: 14px;
-  display: grid; place-items: center; background: linear-gradient(135deg,var(--blue),var(--blue-2));
-  box-shadow: 0 10px 25px rgba(49,95,222,.23);
-}
-.cloud-icon svg { width: 28px; fill: none; stroke: #fff; stroke-width: 1.6; }
-.card-head h2 { margin: 0; font-size: 25px; letter-spacing: -.7px; }
-.card-head p { margin: 7px 0 28px; font-size: 13px; color: var(--muted); }
-.notice {
-  display: none; padding: 16px; gap: 10px;
-  border: 1px solid var(--line); border-radius: 10px; background: #f8fafc;
-}
-.notice.visible { display: flex; }
-.notice-icon {
-  width: 21px; height: 21px; flex: 0 0 21px; border-radius: 50%;
-  background: #e7edfb; color: #4169e1; display: grid; place-items: center; font-size: 11px; font-weight: 800;
-}
-.notice strong { display: block; font-size: 11px; }
-.notice p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
-.card-footer {
-  margin-top: 27px; padding-top: 19px; border-top: 1px solid #eaecf0;
-  text-align: center; color: var(--faint); font-size: 10px;
-}
-.sep { margin: 0 6px; }
-.footer {
-  position: relative; z-index: 1; min-height: 62px; padding: 0 42px 22px;
-  display: flex; justify-content: space-between; align-items: flex-end;
-  color: var(--faint); font-size: 10px;
-}
-.footer nav { display: flex; gap: 20px; }
-@media (max-width: 850px) {
-  .layout { max-width: 520px; grid-template-columns: 1fr; padding-top: 32px; }
-  .hero { display: none; }
-}
-@media (max-width: 520px) {
-  .topbar { min-height: 68px; padding: 0 20px; }
-  .service-status { display: none; }
-  .layout { padding: 30px 16px 60px; }
-  .auth-card { padding: 26px; border-radius: 19px; }
-  .footer { padding: 0 20px 18px; }
-  .footer nav { display: none; }
-}
-EOF
-
-  cat > "${output_dir}/favicon.svg" <<'EOF'
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="16" fill="#111827"/>
-  <path d="M18 44h27a10 10 0 0 0 1-19.9A15 15 0 0 0 17.4 19 12 12 0 0 0 18 44Z"
-        fill="none" stroke="#fff" stroke-width="3"/>
-</svg>
-EOF
-
-  cat > "${output_dir}/robots.txt" <<'EOF'
-User-agent: *
-Disallow: /
-EOF
-
-  cat > "${output_dir}/404.html" <<EOF
-<!doctype html>
-<meta charset="utf-8">
-<title>${service_name} Cloud</title>
-<style>
-body{font-family:system-ui;margin:0;display:grid;place-items:center;min-height:100vh;background:#f5f7fb;color:#101828}
-main{text-align:center}p{color:#667085}
-</style>
-<main><h1>Page unavailable</h1><p>The requested cloud resource is not available on ${domain}.</p></main>
-EOF
-
-  chmod 755 "$output_dir"
-  chmod 644 "$output_dir"/*
-
-  if [[ -d "${BASE_DIR}/html" ]]; then
-    if find "${BASE_DIR}/html" -mindepth 1 -print -quit | grep -q .; then
-      backup_dir="${BASE_DIR}/html.backup-$(date +%Y%m%d-%H%M%S-%N)"
-      mv "${BASE_DIR}/html" "$backup_dir"
-      info "Backup: ${backup_dir}"
-    else
-      rmdir "${BASE_DIR}/html"
-    fi
+reload_selfsteal_nginx() {
+  if docker inspect nginx-selfsteal >/dev/null 2>&1; then
+    docker exec nginx-selfsteal nginx -t >/dev/null 2>&1 \
+      && docker exec nginx-selfsteal nginx -s reload >/dev/null 2>&1 \
+      || docker restart nginx-selfsteal >/dev/null
   fi
-
-  mv "$output_dir" "${BASE_DIR}/html"
 }
+
+# ---------------------------------------------------------------------------
+# SSL / acme.sh
+# ---------------------------------------------------------------------------
 
 install_acme() {
   local email="$1"
@@ -1323,6 +1355,12 @@ check_domain_dns() {
   info "DNS A: ${a_record:-нет}"
   info "DNS AAAA: ${aaaa_record:-нет}"
 
+  local server_ipv4
+  server_ipv4="$(public_ipv4)"
+  if [[ -n "$server_ipv4" && -n "$a_record" && ",${a_record}," != *",${server_ipv4},"* ]]; then
+    warn "A-запись (${a_record}) не совпадает с IPv4 сервера (${server_ipv4}). HTTP-01 может не пройти."
+  fi
+
   if [[ -n "$aaaa_record" ]]; then
     warn "Для домена существует AAAA. IPv6 должен вести на эту же ноду и корректно обслуживать inbound."
   fi
@@ -1341,6 +1379,10 @@ write_reload_helper() {
 set -e
 if docker inspect nginx-selfsteal >/dev/null 2>&1; then
   docker restart nginx-selfsteal >/dev/null
+fi
+if docker inspect remnanode >/dev/null 2>&1; then
+  # Hysteria2 читает сертификат при старте Xray.
+  docker restart remnanode >/dev/null || true
 fi
 exit 0
 EOF
@@ -1384,7 +1426,8 @@ issue_certificate() {
     --standalone \
     -d "$domain" \
     --server letsencrypt \
-    --keylength ec-256
+    --keylength ec-256 \
+    || [[ $? == 2 ]]
 
   install_cert_files "$domain"
   ok "Сертификат установлен в ${BASE_DIR}/ssl."
@@ -1419,8 +1462,20 @@ renew_certificate() {
   install_cert_files "$DOMAIN"
 }
 
+cert_days_left() {
+  local cert="${BASE_DIR}/ssl/fullchain.pem" end_date end_epoch
+  [[ -r "$cert" ]] || return 1
+  end_date="$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null | cut -d= -f2)"
+  end_epoch="$(date -d "$end_date" +%s 2>/dev/null)" || return 1
+  printf '%d' $(( (end_epoch - $(date +%s)) / 86400 ))
+}
+
+# ---------------------------------------------------------------------------
+# Inbound'ы и Reality
+# ---------------------------------------------------------------------------
+
 random_xhttp_path() {
-  printf '/assets/%s' "$(openssl rand -hex 12)"
+  printf '/%s/%s' "$(random_pick assets static cdn media api files)" "$(openssl rand -hex 12)"
 }
 
 prompt_port() {
@@ -1440,13 +1495,13 @@ prompt_inbounds() {
   HY2_ENABLED="0"
 
   echo
-  echo -e "${C_BOLD}Какие inbound'ы создать в Xray profile?${C_RESET}"
-  echo "1. VLESS RAW + REALITY + Selfsteal"
-  echo "2. VLESS XHTTP + REALITY + Selfsteal"
-  echo "3. Hysteria2 (UDP + TLS)"
-  echo "4. Все"
+  echo -e "${C_BOLD}Какие протоколы создать в Xray profile?${C_RESET}"
+  echo "1. VLESS TCP (RAW) + REALITY + Vision   — TCP 443, Selfsteal-сайт как маскировка"
+  echo "2. VLESS XHTTP + REALITY                 — TCP 8443 (или 443 без RAW)"
+  echo "3. Hysteria2                             — UDP 443, TLS-сертификат домена"
+  echo "4. Все три"
   echo
-  echo "Можно указать несколько: 1,2,3"
+  echo "Можно указать один или несколько через запятую: 1  |  1,3  |  2,3  |  1,2,3"
   echo
 
   local selection normalized
@@ -1510,7 +1565,7 @@ prompt_inbounds() {
   fi
 
   if [[ "$RAW_ENABLED" != "1" && "$XHTTP_ENABLED" != "1" ]]; then
-    warn "Выбран только Hysteria2: cloud-заглушка Nginx будет создана, но без Reality inbound она не будет доступна через fallback."
+    warn "Выбран только Hysteria2: сайт-заглушка будет создан, но без Reality inbound он не будет доступен через fallback."
   fi
 }
 
@@ -1521,7 +1576,7 @@ tune_hysteria_udp() {
   fi
 
   cat > /etc/sysctl.d/99-remnanode-hysteria.conf <<'EOF'
-# Remnawave Node Manager - larger UDP buffers for QUIC/Hysteria2
+# RemnaNode Manager — увеличенные UDP-буферы для QUIC/Hysteria2
 net.core.rmem_max=16777216
 net.core.wmem_max=16777216
 EOF
@@ -1548,13 +1603,6 @@ validate_shortids_json() {
   [[ "$count" == "$unique" ]]
 }
 
-secure_random_int() {
-  local minimum="$1" maximum="$2" value span
-  value=$((16#$(openssl rand -hex 4)))
-  span=$((maximum - minimum + 1))
-  printf '%d' "$((minimum + value % span))"
-}
-
 generate_shortids_json() {
   local count="${1:-}" length candidate result='[]'
   [[ -n "$count" ]] || count="$(secure_random_int 3 12)"
@@ -1569,6 +1617,7 @@ generate_shortids_json() {
   printf '%s' "$result"
 }
 
+# Сохраняет существующий список; при миграции одиночный legacy ID остаётся первым.
 ensure_shortids_json() {
   local current="${1:-}" legacy="${2:-}" target result
   if [[ -n "$current" ]] && validate_shortids_json "$current"; then
@@ -1601,11 +1650,10 @@ generate_reality_material() {
     return 0
   fi
 
-  [[ -f "$NODE_COMPOSE_FILE" ]] || die "Compose-файл Node отсутствует: ${NODE_COMPOSE_FILE}"
   docker inspect remnanode >/dev/null 2>&1 || die "Контейнер remnanode не запущен."
 
   local output
-  output="$(docker exec remnanode xray x25519 2>/dev/null || true)"
+  output="$(node_xray_exec x25519 2>/dev/null || true)"
   [[ -n "$output" ]] || die "xray x25519 не вернул ключи."
 
   REALITY_PRIVATE_KEY="$(printf '%s\n' "$output" | awk -F': *' 'tolower($1) ~ /private/ {print $2; exit}')"
@@ -1634,8 +1682,9 @@ rotate_reality_keys() {
     die "В текущем профиле нет REALITY inbound."
   fi
 
-  confirm "Сгенерировать НОВУЮ Reality keypair? Клиентские конфиги после этого нужно обновить." || return 0
+  confirm_no_default "Сгенерировать НОВУЮ Reality keypair? Клиентские конфиги после этого нужно обновить." || return 0
 
+  backup_file "$REALITY_FILE"
   rm -f "$REALITY_FILE"
   REALITY_PRIVATE_KEY=""
   REALITY_PUBLIC_KEY=""
@@ -1645,201 +1694,437 @@ rotate_reality_keys() {
   XHTTP_SHORT_IDS_JSON=""
 
   generate_reality_material
-  generate_xray_profile
+  generate_xray_profile 1
 
   warn "Новый profile нужно сохранить/запушить в Remnawave Panel."
 }
 
-join_by_comma() {
-  local IFS=,
-  echo "$*"
+regenerate_short_ids() {
+  load_state
+  load_reality
+  [[ -n "$REALITY_PRIVATE_KEY" ]] || die "Reality ещё не настроен."
+
+  echo "RAW Short IDs:   ${RAW_SHORT_IDS_JSON:-нет}"
+  echo "XHTTP Short IDs: ${XHTTP_SHORT_IDS_JSON:-нет}"
+  echo
+  warn "Клиенты со старыми Short IDs перестанут подключаться после применения профиля в Panel."
+  confirm_no_default "Сгенерировать новые Short IDs?" || return 0
+
+  local count
+  read -r -p "Количество (Enter = случайно 3–12): " count
+  backup_file "$REALITY_FILE"
+  RAW_SHORT_IDS_JSON="$(generate_shortids_json "$count")"
+  XHTTP_SHORT_IDS_JSON="$(generate_shortids_json "$count")"
+  RAW_SHORT_ID="$(jq -r '.[0]' <<<"$RAW_SHORT_IDS_JSON")"
+  XHTTP_SHORT_ID="$(jq -r '.[0]' <<<"$XHTTP_SHORT_IDS_JSON")"
+  save_reality
+  generate_xray_profile 1
+}
+
+# ---------------------------------------------------------------------------
+# Routing: списки доменов модулей и geo-файлы roscomvpn
+# ---------------------------------------------------------------------------
+
+geo_files_present() {
+  [[ -s "${GEO_DIR}/${GEO_SITE_FILE}" && -s "${GEO_DIR}/${GEO_IP_FILE}" ]]
+}
+
+# Префикс для правил: roscomvpn через ext:, иначе встроенные geosite/geoip Xray.
+geo_site_ref() {
+  local category="$1"
+  if [[ "$GEO_ENABLED" == "1" ]]; then
+    printf 'ext:%s:%s' "$GEO_SITE_FILE" "$category"
+  else
+    printf 'geosite:%s' "$category"
+  fi
+}
+
+geo_ip_ref() {
+  local category="$1"
+  if [[ "$GEO_ENABLED" == "1" ]]; then
+    printf 'ext:%s:%s' "$GEO_IP_FILE" "$category"
+  else
+    printf 'geoip:%s' "$category"
+  fi
+}
+
+default_routing_list() {
+  case "$1" in
+    warp)
+      cat <<'EOF'
+# Домены через WARP (по одному на строку: domain:, full:, keyword:, regexp:, geosite:, ext:)
+domain:openai.com
+domain:chatgpt.com
+domain:oaistatic.com
+domain:oaiusercontent.com
+domain:anthropic.com
+domain:claude.ai
+domain:gemini.google.com
+domain:aistudio.google.com
+domain:generativelanguage.googleapis.com
+domain:notebooklm.google.com
+EOF
+      ;;
+    psiphon)
+      cat <<'EOF'
+# Домены через Psiphon (только TCP)
+EOF
+      ;;
+    tor)
+      cat <<'EOF'
+# Домены через Tor
+regexp:\.onion$
+EOF
+      ;;
+  esac
+}
+
+routing_list_file() {
+  printf '%s/%s.list' "$ROUTING_DIR" "$1"
+}
+
+ensure_routing_lists() {
+  mkdir -p "$ROUTING_DIR"
+  chmod 700 "$ROUTING_DIR"
+  local name file
+  for name in warp psiphon tor; do
+    file="$(routing_list_file "$name")"
+    [[ -f "$file" ]] || default_routing_list "$name" > "$file"
+  done
+}
+
+# Печатает JSON-массив доменов из файла списка (без комментариев и пустых строк).
+routing_list_json() {
+  local file
+  file="$(routing_list_file "$1")"
+  [[ -f "$file" ]] || { printf '[]'; return 0; }
+  grep -vE '^[[:space:]]*(#|$)' "$file" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | jq -R . | jq -cs .
+}
+
+edit_routing_list() {
+  local name="$1" file
+  ensure_routing_lists
+  file="$(routing_list_file "$name")"
+  "${EDITOR:-nano}" "$file" || vi "$file"
+}
+
+# ---------------------------------------------------------------------------
+# Генерация Xray Config Profile
+# ---------------------------------------------------------------------------
+
+build_inbounds_json() {
+  local result='[]'
+
+  if [[ "$RAW_ENABLED" == "1" ]]; then
+    result="$(jq -c \
+      --argjson port "$RAW_PORT" \
+      --argjson shortIds "$RAW_SHORT_IDS_JSON" \
+      --arg privateKey "$REALITY_PRIVATE_KEY" \
+      --arg domain "$DOMAIN" \
+      '. + [{
+        tag: "VLESS_RAW_REALITY",
+        port: $port,
+        listen: "0.0.0.0",
+        protocol: "vless",
+        settings: {clients: [], decryption: "none"},
+        sniffing: {enabled: true, destOverride: ["http", "tls", "quic"]},
+        streamSettings: {
+          network: "raw",
+          security: "reality",
+          realitySettings: {
+            show: false,
+            xver: 1,
+            target: "/dev/shm/nginx.sock",
+            spiderX: "",
+            shortIds: $shortIds,
+            privateKey: $privateKey,
+            serverNames: [$domain],
+            minClientVer: "0.0.0"
+          }
+        }
+      }]' <<<"$result")"
+  fi
+
+  if [[ "$XHTTP_ENABLED" == "1" ]]; then
+    result="$(jq -c \
+      --argjson port "$XHTTP_PORT" \
+      --argjson shortIds "$XHTTP_SHORT_IDS_JSON" \
+      --arg privateKey "$REALITY_PRIVATE_KEY" \
+      --arg domain "$DOMAIN" \
+      --arg path "$XHTTP_PATH" \
+      --arg mode "$XHTTP_MODE" \
+      '. + [{
+        tag: "VLESS_XHTTP_REALITY",
+        port: $port,
+        listen: "0.0.0.0",
+        protocol: "vless",
+        settings: {clients: [], decryption: "none"},
+        sniffing: {enabled: true, destOverride: ["http", "tls", "quic"]},
+        streamSettings: {
+          network: "xhttp",
+          security: "reality",
+          xhttpSettings: {path: $path, mode: $mode},
+          realitySettings: {
+            show: false,
+            xver: 1,
+            target: "/dev/shm/nginx.sock",
+            spiderX: "",
+            shortIds: $shortIds,
+            privateKey: $privateKey,
+            serverNames: [$domain],
+            minClientVer: "0.0.0"
+          }
+        }
+      }]' <<<"$result")"
+  fi
+
+  if [[ "$HY2_ENABLED" == "1" ]]; then
+    result="$(jq -c \
+      --argjson port "$HY2_PORT" \
+      --arg domain "$DOMAIN" \
+      '. + [{
+        tag: "HYSTERIA2",
+        port: $port,
+        listen: "0.0.0.0",
+        protocol: "hysteria",
+        settings: {clients: [], version: 2},
+        streamSettings: {
+          network: "hysteria",
+          security: "tls",
+          finalmask: {quicParams: {debug: false, congestion: "bbr"}},
+          tlsSettings: {
+            alpn: ["h3"],
+            serverName: $domain,
+            certificates: [{
+              keyFile: "/opt/remnanode/ssl/privkey.pem",
+              certificateFile: "/opt/remnanode/ssl/fullchain.pem"
+            }]
+          },
+          hysteriaSettings: {version: 2}
+        }
+      }]' <<<"$result")"
+  fi
+
+  printf '%s' "$result"
+}
+
+build_outbounds_json() {
+  local result
+  result='[{"tag":"DIRECT","protocol":"freedom"},{"tag":"BLOCK","protocol":"blackhole"}]'
+
+  # Перехваченные DNS-запросы клиентов обрабатывает DNS-модуль Xray.
+  if [[ "$DNS_HIJACK" == "1" ]]; then
+    result="$(jq -c '. + [{tag: "dns-out", protocol: "dns"}]' <<<"$result")"
+  fi
+
+  if [[ "$WARP_OUTBOUND" == "1" ]]; then
+    result="$(jq -c '. + [{
+      tag: "WARP",
+      protocol: "freedom",
+      settings: {domainStrategy: "UseIPv4"},
+      streamSettings: {sockopt: {interface: "warp", tcpFastOpen: true}}
+    }]' <<<"$result")"
+  fi
+
+  if [[ "$PSIPHON_OUTBOUND" == "1" ]]; then
+    result="$(jq -c --arg address "$PSIPHON_ADDR" --argjson port "$PSIPHON_PORT" '. + [{
+      tag: "PSIPHON",
+      protocol: "socks",
+      settings: {address: $address, port: $port}
+    }]' <<<"$result")"
+  fi
+
+  if [[ "$TOR_OUTBOUND" == "1" ]]; then
+    result="$(jq -c '. + [{
+      tag: "TOR",
+      protocol: "socks",
+      settings: {address: "127.0.0.1", port: 9050}
+    }]' <<<"$result")"
+  fi
+
+  printf '%s' "$result"
+}
+
+ru_policy_tag() {
+  case "$RU_POLICY" in
+    direct) printf 'DIRECT' ;;
+    warp)
+      if [[ "$WARP_OUTBOUND" == "1" ]]; then
+        printf 'WARP'
+      else
+        printf 'BLOCK'
+      fi
+      ;;
+    *) printf 'BLOCK' ;;
+  esac
+}
+
+# Домены и IP «РФ + белые списки» — общие для DNS и routing.
+ru_domain_matchers() {
+  if [[ "$GEO_ENABLED" == "1" ]]; then
+    jq -cn --arg ru "$(geo_site_ref category-ru)" --arg wl "$(geo_site_ref whitelist)" '[$ru, $wl]'
+  else
+    jq -cn '["geosite:category-ru", "regexp:\\.ru$", "regexp:\\.su$", "regexp:\\.xn--p1ai$"]'
+  fi
+}
+
+ru_ip_matchers() {
+  if [[ "$GEO_ENABLED" == "1" ]]; then
+    jq -cn --arg direct "$(geo_ip_ref direct)" --arg whitelist "$(geo_ip_ref whitelist)" '[$direct, $whitelist]'
+  else
+    jq -cn '["geoip:ru"]'
+  fi
+}
+
+# Список "a,b,c" → JSON-массив.
+csv_to_json() {
+  tr ',' '\n' <<<"$1" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | grep -v '^$' | jq -R . | jq -cs .
+}
+
+# Split DNS. РФ-домены резолвятся РФ-серверами, и ответ принимается, только
+# если указывает на РФ-адрес (expectIPs) — иначе запрос уходит дальше.
+# Остальные домены — через зарубежный DoH, который не видят провайдер и ТСПУ.
+build_dns_json() {
+  jq -cn \
+    --argjson ruDomains "$(ru_domain_matchers)" \
+    --argjson ruIps "$(ru_ip_matchers)" \
+    --argjson ruServers "$(csv_to_json "$DNS_RU")" \
+    --argjson foreign "$(csv_to_json "$DNS_FOREIGN")" \
+    '{
+      tag: "dns-internal",
+      queryStrategy: "UseIPv4",
+      disableFallbackIfMatch: true,
+      servers: (
+        [$ruServers[] | {address: ., domains: $ruDomains, expectIPs: $ruIps, skipFallback: true}]
+        + $foreign
+      )
+    }'
+}
+
+build_routing_json() {
+  local rules='[]' list ru_tag
+
+  # 0. DNS. Собственные запросы резолвера Xray идут напрямую — иначе запрос
+  #    к РФ-DNS попал бы под правило geoip:ru → BLOCK. Клиентский DNS внутри
+  #    туннеля перехватывается и обрабатывается той же split-схемой (без утечек).
+  rules="$(jq -c '. + [{type: "field", inboundTag: ["dns-internal"], outboundTag: "DIRECT"}]' <<<"$rules")"
+  if [[ "$DNS_HIJACK" == "1" ]]; then
+    rules="$(jq -c '. + [{type: "field", port: "53", outboundTag: "dns-out"}]' <<<"$rules")"
+  fi
+
+  # 1. Локальные сети: никогда не проксировать внутрь инфраструктуры сервера.
+  rules="$(jq -c '. + [
+    {type: "field", ip: ["geoip:private"], outboundTag: "BLOCK"},
+    {type: "field", domain: ["geosite:private"], outboundTag: "BLOCK"}
+  ]' <<<"$rules")"
+
+  # 2. Торренты: протокол и трекеры блокируются полностью.
+  rules="$(jq -c '. + [{type: "field", protocol: ["bittorrent"], outboundTag: "BLOCK"}]' <<<"$rules")"
+  if [[ "$GEO_ENABLED" == "1" ]]; then
+    rules="$(jq -c --arg torrent "$(geo_site_ref torrent)" \
+      '. + [{type: "field", domain: [$torrent], outboundTag: "BLOCK"}]' <<<"$rules")"
+  fi
+
+  # 3. Реклама и телеметрия (опционально).
+  if [[ "$BLOCK_ADS" == "1" ]]; then
+    if [[ "$GEO_ENABLED" == "1" ]]; then
+      rules="$(jq -c --arg ads "$(geo_site_ref category-ads)" --arg spy "$(geo_site_ref win-spy)" \
+        '. + [{type: "field", domain: [$ads, $spy], outboundTag: "BLOCK"}]' <<<"$rules")"
+    else
+      rules="$(jq -c '. + [{type: "field", domain: ["geosite:category-ads-all"], outboundTag: "BLOCK"}]' <<<"$rules")"
+    fi
+  fi
+
+  # 4. Модули: выбранные домены через WARP / Psiphon / Tor.
+  if [[ "$TOR_OUTBOUND" == "1" ]]; then
+    list="$(routing_list_json tor)"
+    [[ "$list" != "[]" ]] && rules="$(jq -c --argjson d "$list" \
+      '. + [{type: "field", domain: $d, outboundTag: "TOR"}]' <<<"$rules")"
+  fi
+  if [[ "$PSIPHON_OUTBOUND" == "1" ]]; then
+    list="$(routing_list_json psiphon)"
+    [[ "$list" != "[]" ]] && rules="$(jq -c --argjson d "$list" \
+      '. + [{type: "field", network: "tcp", domain: $d, outboundTag: "PSIPHON"}]' <<<"$rules")"
+  fi
+  if [[ "$WARP_OUTBOUND" == "1" ]]; then
+    list="$(routing_list_json warp)"
+    [[ "$list" != "[]" ]] && rules="$(jq -c --argjson d "$list" \
+      '. + [{type: "field", domain: $d, outboundTag: "WARP"}]' <<<"$rules")"
+  fi
+
+  # 5. РФ-сайты и белые списки. Клиент должен ходить к ним напрямую;
+  #    если трафик всё же пришёл на ноду — применяется политика RU_POLICY.
+  ru_tag="$(ru_policy_tag)"
+  rules="$(jq -c --arg tag "$ru_tag" \
+    --argjson domains "$(ru_domain_matchers)" --argjson ips "$(ru_ip_matchers)" \
+    '. + [
+      {type: "field", domain: $domains, outboundTag: $tag},
+      {type: "field", ip: $ips, outboundTag: $tag}
+    ]' <<<"$rules")"
+
+  # 6. Всё остальное уходит в первый outbound (DIRECT) — обычный выход ноды.
+  jq -cn --argjson rules "$rules" '{domainStrategy: "IPIfNonMatch", rules: $rules}'
 }
 
 generate_xray_profile() {
   local use_current_state="${1:-0}"
   [[ "$use_current_state" == "1" ]] || load_state
 
-  is_selfsteal_mode || die "Профиль Selfsteal не настроен."
-  [[ -n "$DOMAIN" ]] || die "DOMAIN отсутствует."
-
   mkdir -p "$PROFILE_DIR"
+  ensure_routing_lists
 
-  local inbounds=()
-  local profile_tmp profile_info_tmp
-  profile_tmp="$(mktemp "${PROFILE_FILE}.tmp.XXXXXX")"
-  profile_info_tmp="$(mktemp "${PROFILE_INFO}.tmp.XXXXXX")"
+  if [[ "$GEO_ENABLED" == "1" ]] && ! geo_files_present; then
+    warn "Geo-файлы roscomvpn не найдены — используются встроенные geosite/geoip Xray."
+    GEO_ENABLED="0"
+  fi
 
   if [[ "$RAW_ENABLED" == "1" || "$XHTTP_ENABLED" == "1" ]]; then
+    [[ -n "$DOMAIN" ]] || die "DOMAIN отсутствует — Reality inbound без Selfsteal невозможен."
     generate_reality_material
     load_reality
   fi
-
-  if [[ "$RAW_ENABLED" == "1" ]]; then
-    inbounds+=("$(cat <<EOF
-{
-  "tag": "VLESS_RAW_REALITY",
-  "port": ${RAW_PORT},
-  "listen": "0.0.0.0",
-  "protocol": "vless",
-  "settings": {
-    "clients": [],
-    "decryption": "none"
-  },
-  "sniffing": {
-    "enabled": true,
-    "destOverride": ["http", "tls", "quic"]
-  },
-  "streamSettings": {
-    "network": "raw",
-    "security": "reality",
-    "realitySettings": {
-      "show": false,
-      "xver": 1,
-      "target": "/dev/shm/nginx.sock",
-      "spiderX": "",
-      "shortIds": ${RAW_SHORT_IDS_JSON},
-      "privateKey": "${REALITY_PRIVATE_KEY}",
-      "serverNames": ["${DOMAIN}"],
-      "minClientVer": "0.0.0"
-    }
-  }
-}
-EOF
-)")
-  fi
-
-  if [[ "$XHTTP_ENABLED" == "1" ]]; then
-    inbounds+=("$(cat <<EOF
-{
-  "tag": "VLESS_XHTTP_REALITY",
-  "port": ${XHTTP_PORT},
-  "listen": "0.0.0.0",
-  "protocol": "vless",
-  "settings": {
-    "clients": [],
-    "decryption": "none"
-  },
-  "sniffing": {
-    "enabled": true,
-    "destOverride": ["http", "tls", "quic"]
-  },
-  "streamSettings": {
-    "network": "xhttp",
-    "security": "reality",
-    "xhttpSettings": {
-      "path": "${XHTTP_PATH}",
-      "mode": "${XHTTP_MODE}"
-    },
-    "realitySettings": {
-      "show": false,
-      "xver": 1,
-      "target": "/dev/shm/nginx.sock",
-      "spiderX": "",
-      "shortIds": ${XHTTP_SHORT_IDS_JSON},
-      "privateKey": "${REALITY_PRIVATE_KEY}",
-      "serverNames": ["${DOMAIN}"],
-      "minClientVer": "0.0.0"
-    }
-  }
-}
-EOF
-)")
-  fi
-
   if [[ "$HY2_ENABLED" == "1" ]]; then
-    inbounds+=("$(cat <<EOF
-{
-  "tag": "HYSTERIA2",
-  "port": ${HY2_PORT},
-  "listen": "0.0.0.0",
-  "protocol": "hysteria",
-  "settings": {
-    "clients": [],
-    "version": 2
-  },
-  "streamSettings": {
-    "network": "hysteria",
-    "security": "tls",
-    "finalmask": {
-      "quicParams": {
-        "debug": false,
-        "congestion": "bbr"
-      }
-    },
-    "tlsSettings": {
-      "alpn": ["h3"],
-      "serverName": "${DOMAIN}",
-      "certificates": [
-        {
-          "keyFile": "/opt/remnanode/ssl/privkey.pem",
-          "certificateFile": "/opt/remnanode/ssl/fullchain.pem"
-        }
-      ]
-    },
-    "hysteriaSettings": {
-      "version": 2
-    }
-  }
-}
-EOF
-)")
+    [[ -n "$DOMAIN" ]] || die "DOMAIN отсутствует — Hysteria2 требует сертификат."
   fi
 
-  local inbound_json
-  inbound_json="$(join_by_comma "${inbounds[@]}")"
+  validate_dns_list "$DNS_RU" || die "Некорректный список РФ-DNS: ${DNS_RU}"
+  validate_dns_list "$DNS_FOREIGN" || die "Некорректный список зарубежных DNS: ${DNS_FOREIGN}"
 
-  cat > "$profile_tmp" <<EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "dns": {
-    "servers": [
-      "1.1.1.1",
-      "1.0.0.1"
-    ]
-  },
-  "inbounds": [
-${inbound_json}
-  ],
-  "outbounds": [
-    {
-      "tag": "DIRECT",
-      "protocol": "freedom"
-    },
-    {
-      "tag": "BLOCK",
-      "protocol": "blackhole"
-    }
-  ],
-  "routing": {
-    "rules": [
-      {
-        "ip": ["geoip:private"],
-        "outboundTag": "BLOCK"
-      },
-      {
-        "domain": ["geosite:private"],
-        "outboundTag": "BLOCK"
-      },
-      {
-        "protocol": ["bittorrent"],
-        "outboundTag": "BLOCK"
-      }
-    ]
-  }
-}
-EOF
+  local inbounds outbounds routing dns profile_tmp profile_info_tmp
+  inbounds="$(build_inbounds_json)"
+  outbounds="$(build_outbounds_json)"
+  routing="$(build_routing_json)"
+  dns="$(build_dns_json)"
 
-  jq empty "$profile_tmp" || die "Сгенерирован некорректный JSON profile."
+  profile_tmp="$(mktemp "${PROFILE_FILE}.tmp.XXXXXX")"
+  profile_info_tmp="$(mktemp "${PROFILE_INFO}.tmp.XXXXXX")"
+
+  jq -n \
+    --argjson inbounds "$inbounds" \
+    --argjson outbounds "$outbounds" \
+    --argjson routing "$routing" \
+    --argjson dns "$dns" \
+    '{
+      log: {loglevel: "warning"},
+      dns: $dns,
+      inbounds: $inbounds,
+      outbounds: $outbounds,
+      routing: $routing
+    }' > "$profile_tmp" || { rm -f "$profile_tmp" "$profile_info_tmp"; die "Не удалось собрать JSON profile."; }
+
   chmod 600 "$profile_tmp"
+  [[ -f "$PROFILE_FILE" ]] && cp -a "$PROFILE_FILE" "${PROFILE_FILE}.prev"
   mv -f "$profile_tmp" "$PROFILE_FILE"
 
   {
-    echo "Remnawave Node Manager ${SCRIPT_VERSION}"
+    echo "RemnaNode Manager ${SCRIPT_VERSION}"
     echo
-    echo "Domain: ${DOMAIN}"
-    echo "Service name: ${SERVICE_NAME}"
+    echo "Mode: ${INSTALL_MODE:-unknown}"
+    echo "Domain: ${DOMAIN:-нет}"
+    echo "Routing: geo=$([[ "$GEO_ENABLED" == 1 ]] && echo roscomvpn || echo builtin), RU=${RU_POLICY}, ads=${BLOCK_ADS}"
+    echo "DNS: РФ-домены → ${DNS_RU}; остальное → ${DNS_FOREIGN}; перехват клиентского DNS: $([[ "$DNS_HIJACK" == 1 ]] && echo вкл || echo выкл)"
+    echo "Outbounds: $(jq -r '[.[].tag] | join(", ")' <<<"$outbounds")"
     echo
 
     if [[ "$RAW_ENABLED" == "1" ]]; then
@@ -1849,6 +2134,7 @@ EOF
       echo "SNI: ${DOMAIN}"
       echo "Short IDs: $(jq -c . <<<"$RAW_SHORT_IDS_JSON")"
       echo "Public Key / Password: ${REALITY_PUBLIC_KEY}"
+      echo "Flow: xtls-rprx-vision"
       echo "Target: /dev/shm/nginx.sock"
       echo
     fi
@@ -1876,211 +2162,51 @@ EOF
       echo
     fi
 
+    if [[ "$(jq 'length' <<<"$inbounds")" == "0" ]]; then
+      echo "Inbound'ов нет: это routing-профиль. Примени его в Panel режимом «merge»"
+      echo "(сохраняются inbound'ы панели, заменяются outbounds/routing/dns)."
+      echo
+    fi
+
     echo "Profile: ${PROFILE_FILE}"
+    [[ "$GEO_ENABLED" == "1" ]] && echo "ВНИМАНИЕ: профиль использует ext:${GEO_SITE_FILE}/ext:${GEO_IP_FILE} — geo-файлы должны быть на КАЖДОЙ ноде с этим профилем."
   } > "$profile_info_tmp"
 
   chmod 600 "$profile_info_tmp"
   mv -f "$profile_info_tmp" "$PROFILE_INFO"
   ok "Xray profile сгенерирован: ${PROFILE_FILE}"
 
-  validate_generated_profile
+  generate_client_routing
+  validate_generated_profile || true
 }
 
 validate_generated_profile() {
+  local file="${1:-$PROFILE_FILE}"
   docker inspect remnanode >/dev/null 2>&1 || return 0
 
-  info "Проверяю сгенерированный Xray JSON текущим Xray внутри remnanode..."
+  info "Проверяю Xray JSON текущим Xray внутри remnanode..."
 
-  if ! docker exec remnanode sh -c 'command -v xray >/dev/null 2>&1'; then
-    warn "В контейнере нет доступной команды xray; выполнена только проверка синтаксиса JSON."
+  if ! docker exec remnanode sh -c 'command -v xray || command -v rw-core' >/dev/null 2>&1; then
+    warn "В контейнере нет бинарника Xray; выполнена только проверка синтаксиса JSON."
     return 0
   fi
 
-  docker cp "$PROFILE_FILE" remnanode:/tmp/remnanode-manager-profile.json >/dev/null
+  docker cp "$file" remnanode:/tmp/remnanode-manager-profile.json >/dev/null
 
-  if docker exec remnanode xray run -test -config /tmp/remnanode-manager-profile.json >/dev/null 2>&1; then
+  local result=0
+  if node_xray_exec run -test -config /tmp/remnanode-manager-profile.json >/dev/null 2>&1; then
     ok "Xray принимает сгенерированный profile."
-  elif docker exec remnanode xray -test -config /tmp/remnanode-manager-profile.json >/dev/null 2>&1; then
+  elif node_xray_exec -test -config /tmp/remnanode-manager-profile.json >/dev/null 2>&1; then
     ok "Xray принимает сгенерированный profile."
   else
-    warn "Автотест Xray profile не прошёл. Версия Xray или конкретный inbound может требовать корректировки."
-    warn "Проверь вручную перед push в Panel: ${PROFILE_FILE}"
-    docker exec remnanode rm -f /tmp/remnanode-manager-profile.json >/dev/null 2>&1 || true
-    return 1
+    warn "Автотест Xray profile не прошёл. Вывод Xray:"
+    node_xray_exec run -test -config /tmp/remnanode-manager-profile.json 2>&1 | tail -n 8 || true
+    warn "Проверь вручную перед push в Panel: ${file}"
+    result=1
   fi
 
   docker exec remnanode rm -f /tmp/remnanode-manager-profile.json >/dev/null 2>&1 || true
-}
-
-manager_compose() {
-  docker compose -f "$NODE_COMPOSE_FILE" "$@"
-}
-
-start_stack() {
-  manager_compose config >/dev/null
-  manager_compose pull
-  manager_compose up -d --remove-orphans
-}
-
-verify_basic() {
-  echo
-  info "Проверка RemnaNode..."
-  manager_compose ps
-
-  local state=""
-  for _ in {1..15}; do
-    state="$(docker inspect remnanode --format '{{.State.Status}}' 2>/dev/null || true)"
-    [[ "$state" == "running" ]] && break
-    sleep 2
-  done
-
-  [[ "$state" == "running" ]] || die "Контейнер remnanode не перешёл в состояние running."
-  ok "Контейнер remnanode запущен."
-
-  if ss -H -lnt "( sport = :${NODE_PORT} )" 2>/dev/null | grep -q .; then
-    ok "Node API слушает TCP ${NODE_PORT}."
-  else
-    warn "TCP ${NODE_PORT} пока не виден. Проверь docker logs remnanode."
-  fi
-}
-
-verify_selfsteal_local() {
-  docker inspect nginx-selfsteal >/dev/null 2>&1 || {
-    warn "nginx-selfsteal не запущен."
-    return 1
-  }
-
-  docker exec nginx-selfsteal nginx -t
-
-  local health
-  health="$(docker inspect nginx-selfsteal --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')"
-  [[ "$health" == "healthy" ]] || die "nginx-selfsteal не прошёл healthcheck: ${health}."
-
-  test -S /dev/shm/nginx.sock || die "Не найден /dev/shm/nginx.sock на хосте."
-
-  docker exec remnanode test -S /dev/shm/nginx.sock \
-    || die "RemnaNode не видит /dev/shm/nginx.sock."
-
-  ok "Nginx и Unix socket работают."
-}
-
-show_remote_certificate() {
-  local port="$1"
-
-  echo | timeout 10 openssl s_client \
-    -connect "${DOMAIN}:${port}" \
-    -servername "$DOMAIN" \
-    -showcerts 2>/dev/null \
-    | openssl x509 \
-      -noout \
-      -subject \
-      -issuer \
-      -dates \
-      -ext subjectAltName 2>/dev/null
-}
-
-diagnostics() {
-  load_state
-  load_reality
-
-  echo
-  echo -e "${C_BOLD}=== Remnawave Node diagnostics ===${C_RESET}"
-  echo "Manager: ${SCRIPT_VERSION}"
-  echo "Mode: ${INSTALL_MODE:-unknown}"
-  echo
-
-  if command -v docker >/dev/null 2>&1; then
-    ok "Docker: $(docker --version)"
-    docker compose version || true
-  else
-    err "Docker не установлен."
-  fi
-
-  echo
-  echo "--- Containers ---"
-  if [[ -f "$NODE_COMPOSE_FILE" ]]; then
-    manager_compose ps || true
-  else
-    warn "Compose-файл Node отсутствует: ${NODE_COMPOSE_FILE}"
-  fi
-
-  echo
-  echo "--- Firewall ---"
-  ufw status verbose || true
-
-  echo
-  echo "--- Listening sockets ---"
-  ss -lntup | grep -E "(:22 |:${NODE_PORT} |:${RAW_PORT:-0} |:${XHTTP_PORT:-0} |:${HY2_PORT:-0} )" || true
-
-  if is_selfsteal_mode; then
-    echo
-    echo "--- DNS ---"
-    dig +short A "$DOMAIN" || true
-    dig +short AAAA "$DOMAIN" || true
-
-    echo
-    echo "--- Local certificate ---"
-    if [[ -f "${BASE_DIR}/ssl/fullchain.pem" ]]; then
-      openssl x509 \
-        -in "${BASE_DIR}/ssl/fullchain.pem" \
-        -noout -subject -issuer -dates -ext subjectAltName || true
-    else
-      err "Нет ${BASE_DIR}/ssl/fullchain.pem"
-    fi
-
-    echo
-    echo "--- Nginx / socket ---"
-    if docker inspect nginx-selfsteal >/dev/null 2>&1; then
-      docker exec nginx-selfsteal nginx -t || true
-      docker exec nginx-selfsteal ls -lah /etc/nginx/ssl/ || true
-    else
-      err "nginx-selfsteal не существует."
-    fi
-
-    ls -lah /dev/shm/nginx.sock 2>/dev/null || true
-    docker exec remnanode ls -lah /dev/shm/nginx.sock 2>/dev/null || true
-
-    if [[ "$RAW_ENABLED" == "1" ]]; then
-      echo
-      echo "--- Remote TLS via RAW Reality fallback :${RAW_PORT} ---"
-      show_remote_certificate "$RAW_PORT" || warn "Сертификат через RAW port не получен."
-    fi
-
-    if [[ "$XHTTP_ENABLED" == "1" ]]; then
-      echo
-      echo "--- Remote TLS via XHTTP Reality fallback :${XHTTP_PORT} ---"
-      show_remote_certificate "$XHTTP_PORT" || warn "Сертификат через XHTTP port не получен."
-    fi
-
-    echo
-    echo "--- acme.sh ---"
-    if [[ -x "$ACME_BIN" ]]; then
-      "$ACME_BIN" --info -d "$DOMAIN" --ecc 2>/dev/null || true
-    else
-      warn "acme.sh не найден."
-    fi
-
-    echo
-    echo "--- Generated profile ---"
-    if [[ -f "$PROFILE_FILE" ]]; then
-      jq empty "$PROFILE_FILE" && ok "JSON profile syntax OK." || err "JSON profile invalid."
-      validate_generated_profile || true
-    else
-      warn "Profile ещё не создан."
-    fi
-  fi
-
-  echo
-  echo "--- Recent RemnaNode log ---"
-  docker logs --tail 40 remnanode 2>&1 || true
-
-  if docker inspect nginx-selfsteal >/dev/null 2>&1; then
-    echo
-    echo "--- Recent nginx-selfsteal log ---"
-    docker logs --tail 40 nginx-selfsteal 2>&1 || true
-  fi
-
-  echo
+  return "$result"
 }
 
 show_profile_info() {
@@ -2098,12 +2224,999 @@ show_profile_info() {
     echo "Reality Public Key / Password: ${REALITY_PUBLIC_KEY}"
   fi
 
-  if confirm "Показать PRIVATE Reality key?"; then
+  if [[ -n "$REALITY_PRIVATE_KEY" ]] && confirm_no_default "Показать PRIVATE Reality key?"; then
     echo "Reality Private Key: ${REALITY_PRIVATE_KEY}"
   fi
 
   echo
   echo "Xray profile: ${PROFILE_FILE}"
+}
+
+print_profile_json() {
+  [[ -f "$PROFILE_FILE" ]] || die "Profile ещё не создан."
+  jq . "$PROFILE_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Клиентская маршрутизация (подписка / Happ)
+# ---------------------------------------------------------------------------
+
+# Первый IP из списка РФ-DNS и первый DoH из зарубежного — для клиентов.
+client_domestic_dns_ip() {
+  local item
+  local -a items=()
+  IFS=, read -r -a items <<<"$DNS_RU"
+  for item in "${items[@]}"; do
+    [[ "$item" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && { printf '%s' "$item"; return 0; }
+  done
+  printf '77.88.8.8'
+}
+
+client_remote_doh() {
+  local item
+  local -a items=()
+  IFS=, read -r -a items <<<"$DNS_FOREIGN"
+  for item in "${items[@]}"; do
+    [[ "$item" == https://* ]] && { printf '%s' "$item"; return 0; }
+  done
+  printf 'https://1.1.1.1/dns-query'
+}
+
+# Популярные РФ-приложения (Android package name) для раздельного
+# туннелирования: исключённые из VPN приложения не видят VPN-интерфейс
+# и ходят в сеть с домашнего IP.
+write_client_ru_apps() {
+  cat > "$CLIENT_APPS_FILE" <<'APPS'
+# Android-приложения, которые стоит исключить из VPN (Happ / v2rayNG:
+# «Раздельное туннелирование» / «Per-app proxy» → режим «в обход»).
+# Проверь названия пакетов в своём клиенте и дополни список.
+ru.sberbankmobile
+com.idamob.tinkoff.android
+ru.vtb24.mobilebanking.android
+ru.alfabank.mobile.android
+ru.rostel
+ru.yandex.searchplugin
+ru.yandex.yandexmaps
+ru.yandex.taxi
+com.yandex.browser
+ru.ozon.app.android
+com.wildberries.ru
+com.avito.android
+com.vkontakte.android
+ru.mail.mailapp
+APPS
+}
+
+generate_client_routing() {
+  mkdir -p "$PROFILE_DIR"
+
+  local block_sites='["geosite:torrent"]'
+  [[ "$BLOCK_ADS" == "1" ]] && block_sites='["geosite:torrent","geosite:category-ads","geosite:win-spy"]'
+
+  local domestic_ip remote_doh remote_host remote_ip
+  domestic_ip="$(client_domestic_dns_ip)"
+  remote_doh="$(client_remote_doh)"
+  remote_host="${remote_doh#https://}"
+  remote_host="${remote_host%%/*}"
+  remote_host="${remote_host%%:*}"
+  remote_ip="$remote_host"
+  [[ "$remote_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || remote_ip="1.1.1.1"
+
+  # Happ: РФ + белые списки напрямую с РФ-DNS, остальное через прокси с DoH
+  # внутри туннеля — зарубежные DNS-запросы не уходят мимо VPN.
+  jq -n \
+    --arg geoip "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip/release/geoip.dat" \
+    --arg geosite "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite/release/geosite.dat" \
+    --arg updated "$(date +%s)" \
+    --argjson block "$block_sites" \
+    --arg domesticIp "$domestic_ip" \
+    --arg remoteDoh "$remote_doh" \
+    --arg remoteIp "$remote_ip" \
+    '{
+      Name: "RemnaNode RU-direct",
+      GlobalProxy: "true",
+      UseChunkFiles: "true",
+      RemoteDns: $remoteIp,
+      DomesticDns: $domesticIp,
+      RemoteDNSType: "DoH",
+      RemoteDNSDomain: $remoteDoh,
+      RemoteDNSIP: $remoteIp,
+      DomesticDNSType: "DoH",
+      DomesticDNSDomain: ("https://" + $domesticIp + "/dns-query"),
+      DomesticDNSIP: $domesticIp,
+      Geoipurl: $geoip,
+      Geositeurl: $geosite,
+      LastUpdated: $updated,
+      DnsHosts: {},
+      RouteOrder: "block-direct-proxy",
+      DirectSites: ["geosite:private", "geosite:category-ru", "geosite:whitelist"],
+      DirectIp: ["geoip:private", "geoip:direct", "geoip:whitelist"],
+      ProxySites: [],
+      ProxyIp: [],
+      BlockSites: $block,
+      BlockIp: [],
+      DomainStrategy: "IPIfNonMatch",
+      FakeDNS: "false"
+    }' > "$CLIENT_ROUTING_FILE"
+
+  # Xray JSON-шаблон подписки Remnawave (теги proxy/direct/block, стандартные
+  # geo-файлы клиента): routing.rules и dns.
+  local client_block='[{"type":"field","protocol":["bittorrent"],"outboundTag":"block"}]'
+  [[ "$BLOCK_ADS" == "1" ]] && client_block='[{"type":"field","protocol":["bittorrent"],"outboundTag":"block"},{"type":"field","domain":["geosite:category-ads-all"],"outboundTag":"block"}]'
+  jq -n --argjson block "$client_block" --arg domesticIp "$domestic_ip" '$block + [
+    {type: "field", ip: ["geoip:private"], outboundTag: "direct"},
+    {type: "field", ip: [$domesticIp], outboundTag: "direct"},
+    {type: "field", domain: ["geosite:private", "geosite:category-ru", "regexp:\\.ru$", "regexp:\\.su$", "regexp:\\.xn--p1ai$"], outboundTag: "direct"},
+    {type: "field", ip: ["geoip:ru"], outboundTag: "direct"},
+    {type: "field", network: "tcp,udp", outboundTag: "proxy"}
+  ]' > "$CLIENT_RULES_FILE"
+
+  jq -n --arg domesticIp "$domestic_ip" --arg remoteDoh "$remote_doh" '{
+    queryStrategy: "UseIPv4",
+    disableFallbackIfMatch: true,
+    servers: [
+      {
+        address: ("https://" + $domesticIp + "/dns-query"),
+        domains: ["geosite:category-ru", "regexp:\\.ru$", "regexp:\\.su$", "regexp:\\.xn--p1ai$"],
+        expectIPs: ["geoip:ru"],
+        skipFallback: true
+      },
+      $remoteDoh
+    ]
+  }' > "$CLIENT_DNS_FILE"
+
+  write_client_ru_apps
+  chmod 644 "$CLIENT_ROUTING_FILE" "$CLIENT_RULES_FILE" "$CLIENT_DNS_FILE" "$CLIENT_APPS_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Remnawave Panel API
+# ---------------------------------------------------------------------------
+
+panel_load() {
+  PANEL_URL=""
+  PANEL_TOKEN=""
+  [[ -r "$PANEL_ENV_FILE" ]] || return 1
+  PANEL_URL="$(sed -n 's/^PANEL_URL=//p' "$PANEL_ENV_FILE" | head -n1)"
+  PANEL_TOKEN="$(sed -n 's/^PANEL_TOKEN=//p' "$PANEL_ENV_FILE" | head -n1)"
+  [[ -n "$PANEL_URL" && -n "$PANEL_TOKEN" ]]
+}
+
+panel_configured() {
+  [[ -r "$PANEL_ENV_FILE" ]] && grep -q '^PANEL_TOKEN=.' "$PANEL_ENV_FILE"
+}
+
+panel_request() {
+  local method="$1" path="$2" data="${3:-}"
+  panel_load || die "Panel API не настроен."
+  local -a request=(curl -fsS --connect-timeout 5 --max-time 20 -X "$method"
+    -H "Authorization: Bearer ${PANEL_TOKEN}"
+    -H 'Content-Type: application/json'
+    -H 'X-Forwarded-Proto: https'
+    -H 'X-Forwarded-For: 127.0.0.1')
+  [[ -n "$data" ]] && request+=(--data-binary "@${data}")
+  request+=("${PANEL_URL%/}${path}")
+  "${request[@]}"
+}
+
+# ---------------------------------------------------------------------------
+# Состояние Node / Xray / Selfsteal / Panel
+# ---------------------------------------------------------------------------
+
+# Результат кешируется в пределах процесса: шапка вызывает проверку много раз.
+DOCKER_AVAILABLE_CACHE=""
+docker_available() {
+  if [[ -z "$DOCKER_AVAILABLE_CACHE" ]]; then
+    if command -v docker >/dev/null 2>&1 && docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+      DOCKER_AVAILABLE_CACHE="1"
+    else
+      DOCKER_AVAILABLE_CACHE="0"
+    fi
+  fi
+  [[ "$DOCKER_AVAILABLE_CACHE" == "1" ]]
+}
+
+node_exists() {
+  docker_available && docker inspect remnanode >/dev/null 2>&1
+}
+
+node_running() {
+  [[ "$(docker inspect -f '{{.State.Running}}' remnanode 2>/dev/null)" == "true" ]]
+}
+
+# Запускает бинарник Xray в контейнере ноды (xray или rw-core в новых образах).
+node_xray_exec() {
+  docker exec remnanode sh -c 'b="$(command -v xray || command -v rw-core || true)"; [ -n "$b" ] || exit 127; exec "$b" "$@"' sh "$@"
+}
+
+xray_running() {
+  pgrep -x xray >/dev/null 2>&1 || pgrep -x rw-core >/dev/null 2>&1
+}
+
+runtime_cache_get() {
+  local key="$1" ttl="$2" file="${RUNTIME_CACHE}/${1}"
+  [[ -f "$file" ]] || return 1
+  if [[ "$ttl" != "0" ]]; then
+    local age=$(( $(date +%s) - $(stat -c %Y "$file" 2>/dev/null || echo 0) ))
+    ((age <= ttl)) || return 1
+  fi
+  cat "$file"
+  : "$key"
+}
+
+runtime_cache_put() {
+  mkdir -p "$RUNTIME_CACHE" 2>/dev/null || return 0
+  printf '%s' "$2" > "${RUNTIME_CACHE}/${1}" 2>/dev/null || true
+}
+
+# Ключ кеша версий меняется при пересоздании/перезапуске контейнера.
+node_cache_key() {
+  docker inspect -f '{{.Id}}{{.State.StartedAt}}' remnanode 2>/dev/null | md5sum | cut -c1-12
+}
+
+node_image_ref() {
+  docker inspect -f '{{.Config.Image}}' remnanode 2>/dev/null || true
+}
+
+node_version() {
+  node_exists || { printf '—'; return 0; }
+  local key cached ref tag version image_id
+  key="node-version-$(node_cache_key)"
+  if cached="$(runtime_cache_get "$key" 0)"; then
+    printf '%s' "$cached"
+    return 0
+  fi
+
+  ref="$(node_image_ref)"
+  tag=""
+  if [[ "$ref" != *@* && "${ref##*/}" == *:* ]]; then
+    tag="${ref##*:}"
+  fi
+
+  version=""
+  if [[ -n "$tag" && "$tag" != "latest" && "$tag" =~ [0-9] ]]; then
+    version="${tag#v}"
+  else
+    image_id="$(docker inspect -f '{{.Image}}' remnanode 2>/dev/null || true)"
+    version="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image_id" 2>/dev/null || true)"
+    [[ "$version" == "<no value>" ]] && version=""
+    if [[ -z "$version" ]] && node_running; then
+      version="$(docker exec remnanode sh -c 'cat /opt/app/package.json /app/package.json 2>/dev/null' 2>/dev/null \
+        | jq -r 'select(.version) | .version' 2>/dev/null | head -n1 || true)"
+    fi
+  fi
+  version="${version:-unknown}"
+  runtime_cache_put "$key" "$version"
+  printf '%s' "$version"
+}
+
+xray_version() {
+  node_running || { printf '—'; return 0; }
+  local key cached version
+  key="xray-version-$(node_cache_key)"
+  if cached="$(runtime_cache_get "$key" 0)"; then
+    printf '%s' "$cached"
+    return 0
+  fi
+  version="$(node_xray_exec version 2>/dev/null | awk 'NR==1 {print $2}' || true)"
+  version="${version:-unknown}"
+  runtime_cache_put "$key" "$version"
+  printf '%s' "$version"
+}
+
+node_api_listening() {
+  local port="${NODE_PORT:-2222}"
+  ss -H -lnt "( sport = :${port} )" 2>/dev/null | grep -q .
+}
+
+# ONLINE | DEGRADED | OFFLINE | NOT INSTALLED | NO DOCKER
+node_state() {
+  docker_available || { printf 'NO DOCKER'; return 0; }
+  node_exists || { printf 'NOT INSTALLED'; return 0; }
+  node_running || { printf 'OFFLINE'; return 0; }
+  if node_api_listening && xray_running; then
+    printf 'ONLINE'
+  elif node_api_listening; then
+    # API поднят, но Panel ещё не отправила конфиг Xray.
+    printf 'WAITING'
+  else
+    printf 'DEGRADED'
+  fi
+}
+
+# HEALTHY | DEGRADED | DOWN | NOT INSTALLED
+selfsteal_state() {
+  docker_available || { printf 'NOT INSTALLED'; return 0; }
+  docker inspect nginx-selfsteal >/dev/null 2>&1 || { printf 'NOT INSTALLED'; return 0; }
+  local running health
+  running="$(docker inspect -f '{{.State.Running}}' nginx-selfsteal 2>/dev/null || true)"
+  [[ "$running" == "true" ]] || { printf 'DOWN'; return 0; }
+  health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' nginx-selfsteal 2>/dev/null || true)"
+  if [[ -S /dev/shm/nginx.sock && ( "$health" == "healthy" || "$health" == "none" ) ]]; then
+    printf 'HEALTHY'
+  else
+    printf 'DEGRADED'
+  fi
+}
+
+panel_link_active() {
+  local port="${NODE_PORT:-2222}"
+  ss -H -tn state established "( sport = :${port} )" 2>/dev/null | grep -q .
+}
+
+# Проверка токена кешируется на 60 секунд, чтобы не нагружать панель.
+panel_api_status() {
+  panel_configured || { printf 'none'; return 0; }
+  local cached status
+  if cached="$(runtime_cache_get panel.status 60)"; then
+    printf '%s' "$cached"
+    return 0
+  fi
+  if ( panel_request GET /api/config-profiles ) 2>/dev/null | jq -e '.response' >/dev/null 2>&1; then
+    status="ok"
+  else
+    status="fail"
+  fi
+  runtime_cache_put panel.status "$status"
+  printf '%s' "$status"
+}
+
+# CONNECTED | NO LINK | NOT INSTALLED
+panel_state() {
+  node_exists || { printf 'NOT INSTALLED'; return 0; }
+  # Xray стартует только после получения конфигурации от Panel.
+  if panel_link_active || xray_running; then
+    printf 'CONNECTED'
+  else
+    printf 'NO LINK'
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Метрики сервера
+# ---------------------------------------------------------------------------
+
+cpu_usage_percent() {
+  local -a a b
+  read -r -a a < <(grep '^cpu ' /proc/stat)
+  sleep 0.3
+  read -r -a b < <(grep '^cpu ' /proc/stat)
+  local idle_a=$((a[4] + a[5])) idle_b=$((b[4] + b[5]))
+  local total_a=0 total_b=0 i
+  for i in 1 2 3 4 5 6 7 8; do
+    total_a=$((total_a + ${a[$i]:-0}))
+    total_b=$((total_b + ${b[$i]:-0}))
+  done
+  local total=$((total_b - total_a)) idle=$((idle_b - idle_a))
+  ((total > 0)) || { printf '0'; return 0; }
+  printf '%d' $(( (100 * (total - idle)) / total ))
+}
+
+memory_summary() {
+  local total available
+  total="$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)"
+  available="$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)"
+  printf '%s / %s' "$(human_bytes $((total - available)))" "$(human_bytes "$total")"
+}
+
+swap_summary() {
+  local total free
+  total="$(awk '/^SwapTotal:/ {print $2 * 1024}' /proc/meminfo)"
+  free="$(awk '/^SwapFree:/ {print $2 * 1024}' /proc/meminfo)"
+  if ((total == 0)); then
+    printf 'нет'
+  else
+    printf '%s / %s' "$(human_bytes $((total - free)))" "$(human_bytes "$total")"
+  fi
+}
+
+disk_percent() {
+  df -P / 2>/dev/null | awk 'NR==2 {print $5}'
+}
+
+load_average() {
+  awk '{print $1}' /proc/loadavg
+}
+
+uptime_human() {
+  local seconds days hours minutes
+  seconds="$(awk '{print int($1)}' /proc/uptime)"
+  days=$((seconds / 86400))
+  hours=$(((seconds % 86400) / 3600))
+  minutes=$(((seconds % 3600) / 60))
+  if ((days > 0)); then
+    printf '%dd %dh' "$days" "$hours"
+  else
+    printf '%dh %dm' "$hours" "$minutes"
+  fi
+}
+
+docker_state() {
+  command -v docker >/dev/null 2>&1 || { printf 'NOT INSTALLED'; return 0; }
+  if systemctl is-active --quiet docker 2>/dev/null; then
+    printf 'RUNNING'
+  else
+    printf 'STOPPED'
+  fi
+}
+
+is_public_ipv4() {
+  local ip="$1" a b c d
+  IFS=. read -r a b c d <<<"$ip"
+  [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]] || return 1
+  ((a == 0 || a == 10 || a == 127 || a >= 224)) && return 1
+  ((a == 100 && b >= 64 && b <= 127)) && return 1
+  ((a == 169 && b == 254)) && return 1
+  ((a == 172 && b >= 16 && b <= 31)) && return 1
+  ((a == 192 && b == 168)) && return 1
+  ((a == 198 && (b == 18 || b == 19))) && return 1
+  return 0
+}
+
+is_public_ipv6() {
+  local ip="${1,,}"
+  [[ "$ip" == *:* ]] || return 1
+  [[ "$ip" == ::1 || "$ip" == :: || "$ip" == fe[89ab]* || "$ip" == f[cd]* ]] && return 1
+  return 0
+}
+
+# Сначала адреса интерфейсов; при NAT — внешний сервис (результат кешируется на час).
+public_ipv4() {
+  local ip cached
+  while read -r ip; do
+    is_public_ipv4 "$ip" && { printf '%s' "$ip"; return 0; }
+  done < <(ip -o -4 addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
+  if cached="$(runtime_cache_get public.ipv4 3600)"; then
+    printf '%s' "$cached"
+    return 0
+  fi
+  ip="$(curl -4 -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)"
+  is_public_ipv4 "$ip" || ip=""
+  runtime_cache_put public.ipv4 "$ip"
+  printf '%s' "$ip"
+}
+
+public_ipv6() {
+  local ip
+  while read -r ip; do
+    is_public_ipv6 "$ip" && { printf '%s' "$ip"; return 0; }
+  done < <(ip -o -6 addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
+  return 0
+}
+
+state_color() {
+  case "$1" in
+    ONLINE|RUNNING|HEALTHY|CONNECTED|ACTIVE) printf '%s' "$C_GREEN" ;;
+    DEGRADED|WAITING|"NO LINK"|STOPPED|DOWN) printf '%s' "$C_YELLOW" ;;
+    OFFLINE|FAILED) printf '%s' "$C_RED" ;;
+    *) printf '%s' "$C_GRAY" ;;
+  esac
+}
+
+status_line() {
+  local name="$1" state="$2" extra="${3:-}" color
+  color="$(state_color "$state")"
+  printf ' %b●%b %-11s %b%-14s%b %s\n' "$color" "$C_RESET" "$name" "$color" "$state" "$C_RESET" "$extra"
+}
+
+print_header() {
+  # Docker мог быть установлен в предыдущем действии меню.
+  DOCKER_AVAILABLE_CACHE=""
+  load_state 2>/dev/null || true
+  local node selfsteal panel docker_s cpu mem disk load up ipv4 ipv6 xray_state panel_extra site_extra days
+
+  node="$(node_state)"
+  if xray_running; then xray_state="RUNNING"; else xray_state="STOPPED"; fi
+  [[ "$node" == "NOT INSTALLED" || "$node" == "NO DOCKER" ]] && xray_state="N/A"
+  selfsteal="$(selfsteal_state)"
+  panel="$(panel_state)"
+  docker_s="$(docker_state)"
+  cpu="$(cpu_usage_percent)"
+  mem="$(memory_summary)"
+  disk="$(disk_percent)"
+  load="$(load_average)"
+  up="$(uptime_human)"
+  ipv4="$(public_ipv4)"
+  ipv6="$(public_ipv6)"
+
+  site_extra="nginx"
+  if [[ "$selfsteal" != "NOT INSTALLED" ]]; then
+    [[ -n "${SITE_TEMPLATE:-}" ]] && site_extra+=" · ${SITE_TEMPLATE}"
+    if days="$(cert_days_left 2>/dev/null)"; then
+      site_extra+=" · SSL ${days}d"
+    fi
+  else
+    site_extra=""
+  fi
+
+  panel_extra=""
+  case "$(panel_api_status)" in
+    ok) panel_extra="API ✓" ;;
+    fail) panel_extra="API ✗" ;;
+  esac
+
+  echo -e "${C_BOLD}${C_CYAN}RemnaNode Manager${C_RESET} ${C_GRAY}v${SCRIPT_VERSION}${C_RESET}   ${C_GRAY}$(hostname 2>/dev/null) · ${INSTALL_MODE:-not installed}${C_RESET}"
+  echo -e "${C_GRAY}──────────────────────────────────────────────────────────────${C_RESET}"
+  status_line "Node" "$node" "Ver: $(node_version)"
+  status_line "Xray" "$xray_state" "Ver: $(xray_version)"
+  status_line "Selfsteal" "$selfsteal" "$site_extra"
+  status_line "Panel" "$panel" "$panel_extra"
+  echo
+  printf ' %-5s %-9s %-4s %-19s %-4s %s\n' "CPU" "${cpu}%" "RAM" "$mem" "Disk" "${disk:-?}"
+  printf ' %-5s %-9s %-6s %-17s %-6s %b%s%b\n' "Load" "$load" "Uptime" "$up" "Docker" "$(state_color "$docker_s")" "$docker_s" "$C_RESET"
+  echo
+  printf ' %-5s %s\n' "IPv4" "${ipv4:-— нет}"
+  printf ' %-5s %s\n' "IPv6" "${ipv6:-— нет}"
+  echo -e "${C_GRAY}──────────────────────────────────────────────────────────────${C_RESET}"
+}
+
+# ---------------------------------------------------------------------------
+# Управление Node: версии, обновление, откат
+# ---------------------------------------------------------------------------
+
+require_compose() {
+  load_state
+  [[ -f "$NODE_COMPOSE_FILE" ]] || die "Compose-файл Node отсутствует: ${NODE_COMPOSE_FILE}"
+}
+
+# Digest текущего образа — позволяет откатиться даже с тега latest.
+node_current_digest_ref() {
+  local image_id digest
+  image_id="$(docker inspect -f '{{.Image}}' remnanode 2>/dev/null || true)"
+  [[ -n "$image_id" ]] || return 1
+  digest="$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$image_id" 2>/dev/null \
+    | grep -m1 "^${NODE_IMAGE_REPO}@sha256:" || true)"
+  [[ -n "$digest" ]] || return 1
+  printf '%s' "$digest"
+}
+
+node_list_tags() {
+  info "Получаю список тегов ${NODE_IMAGE_REPO} с Docker Hub..."
+  curl -fsS --max-time 15 \
+    "https://hub.docker.com/v2/repositories/${NODE_IMAGE_REPO}/tags?page_size=60&ordering=last_updated" \
+    | jq -r '.results[] | "\(.name)\t\(.last_updated[0:10])"' \
+    | grep -E '^(latest|dev|v?[0-9]+\.[0-9]+(\.[0-9]+)?)\b' \
+    | head -n 25
+}
+
+node_wait_healthy() {
+  local state=""
+  for _ in {1..20}; do
+    state="$(node_state)"
+    [[ "$state" == "ONLINE" || "$state" == "WAITING" ]] && return 0
+    sleep 3
+  done
+  return 1
+}
+
+node_apply_image() {
+  local new_image="$1"
+  validate_image_ref "$new_image" || die "Некорректный image: ${new_image}"
+
+  local previous
+  previous="$(node_current_digest_ref || node_image_ref)"
+
+  info "Текущий образ: ${previous:-unknown}"
+  info "Новый образ:   ${new_image}"
+
+  docker pull "$new_image" || die "Не удалось скачать ${new_image}."
+  compose_edit set-image "$new_image"
+
+  NODE_PREV_IMAGE="$previous"
+  NODE_IMAGE="$new_image"
+  save_state
+
+  manager_compose up -d --remove-orphans "$NODE_SERVICE_NAME"
+
+  if node_wait_healthy; then
+    ok "Node запущена на ${new_image} (версия $(node_version))."
+  else
+    err "Node не перешла в рабочее состояние."
+    if [[ -n "$previous" ]] && confirm "Откатиться на ${previous}?"; then
+      node_rollback
+    fi
+  fi
+}
+
+node_update() {
+  require_compose
+  local current previous
+  current="$(compose_node_image || printf '%s' "$NODE_IMAGE")"
+  previous="$(node_current_digest_ref || true)"
+
+  info "Обновляю образы (${current})..."
+  manager_compose pull
+  manager_compose up -d --remove-orphans
+
+  if [[ -n "$previous" ]]; then
+    local now
+    now="$(node_current_digest_ref || true)"
+    if [[ "$now" != "$previous" ]]; then
+      NODE_PREV_IMAGE="$previous"
+      save_state
+      info "Для отката сохранён предыдущий digest: ${previous}"
+    else
+      ok "Node уже на последней версии для ${current}."
+    fi
+  fi
+
+  verify_basic
+}
+
+node_select_version() {
+  require_compose
+  echo
+  node_list_tags | awk -F'\t' '{printf "  %-16s %s\n", $1, $2}' || warn "Не удалось получить теги с Docker Hub."
+  echo
+  local tag
+  read -r -p "Тег образа (например 2.1.3 или latest): " tag
+  [[ -n "$tag" ]] || return 0
+  validate_image_tag "$tag" || die "Некорректный тег."
+  node_apply_image "${NODE_IMAGE_REPO}:${tag}"
+}
+
+node_rollback() {
+  require_compose
+  [[ -n "$NODE_PREV_IMAGE" ]] || die "Нет сохранённой предыдущей версии для отката."
+  info "Откат на ${NODE_PREV_IMAGE}"
+  node_apply_image "$NODE_PREV_IMAGE"
+}
+
+node_pin_current() {
+  require_compose
+  local digest
+  digest="$(node_current_digest_ref)" || die "Не удалось определить digest текущего образа."
+  confirm "Закрепить текущую версию (${digest})? Обновления перестанут менять образ." || return 0
+  compose_edit set-image "$digest"
+  NODE_IMAGE="$digest"
+  save_state
+  ok "Версия закреплена."
+}
+
+node_restart() {
+  require_compose
+  manager_compose restart "$NODE_SERVICE_NAME"
+  node_wait_healthy && ok "Node перезапущена." || warn "Node перезапущена, но ещё не в состоянии ONLINE."
+}
+
+node_stop() {
+  require_compose
+  confirm_no_default "Остановить Node? Клиенты будут отключены." || return 0
+  manager_compose stop "$NODE_SERVICE_NAME"
+}
+
+node_start() {
+  require_compose
+  manager_compose up -d
+}
+
+node_show_status() {
+  load_state
+  echo -e "${C_BOLD}RemnaNode${C_RESET}"
+  echo "Состояние:     $(node_state)"
+  echo "Версия:        $(node_version)"
+  echo "Образ:         $(node_image_ref)"
+  echo "Digest:        $(node_current_digest_ref 2>/dev/null || echo '—')"
+  echo "Для отката:    ${NODE_PREV_IMAGE:-—}"
+  echo "Xray:          $(xray_version)"
+  echo "NODE_PORT:     ${NODE_PORT}"
+  echo "Compose:       ${NODE_COMPOSE_FILE}"
+  echo
+  [[ -f "$NODE_COMPOSE_FILE" ]] && manager_compose ps 2>/dev/null || true
+}
+
+node_menu() {
+  while true; do
+    clear || true
+    print_header
+    echo -e "${C_BOLD}Управление Node${C_RESET}"
+    echo
+    echo "1. Подробный статус"
+    echo "2. Перезапустить Node"
+    echo "3. Остановить / 4. Запустить"
+    echo "5. Обновить до последней версии текущего тега"
+    echo "6. Выбрать версию (тег Docker Hub)"
+    echo "7. Откатиться на предыдущую версию"
+    echo "8. Закрепить текущую версию по digest"
+    echo "9. Логи Node (последние 100 строк)"
+    echo
+    echo "0. Назад"
+    echo
+    local choice
+    read -r -p "Выбор: " choice
+    case "$choice" in
+      1) run_action node_show_status; pause ;;
+      2) run_action node_restart; pause ;;
+      3) run_action node_stop; pause ;;
+      4) run_action node_start; pause ;;
+      5) run_action node_update; pause ;;
+      6) run_action node_select_version; pause ;;
+      7) run_action node_rollback; pause ;;
+      8) run_action node_pin_current; pause ;;
+      9) docker logs --tail 100 remnanode 2>&1 | less -R +G || true ;;
+      0) return 0 ;;
+      *) ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Модули: загрузка по требованию
+# ---------------------------------------------------------------------------
+
+# Модуль ищется рядом со скриптом (клон репозитория), затем в каталоге
+# установленной команды remnanode, затем скачивается из GitHub во временный
+# кеш. Версия модуля должна совпадать с версией ядра.
+RNM_MODULES_LOADED=" "
+
+module_version_ok() {
+  grep -qx "RNM_MODULE_VERSION=\"${SCRIPT_VERSION}\"" "$1" 2>/dev/null
+}
+
+module_path() {
+  local name="$1" dir file cache_dir tmp
+  for dir in "${SCRIPT_DIR}/modules" "$RNM_LIB_DIR"; do
+    file="${dir}/${name}.sh"
+    if [[ -f "$file" ]] && module_version_ok "$file"; then
+      printf '%s' "$file"
+      return 0
+    fi
+  done
+
+  cache_dir="${RUNTIME_CACHE}/modules/${SCRIPT_VERSION}"
+  file="${cache_dir}/${name}.sh"
+  if [[ -f "$file" ]] && module_version_ok "$file"; then
+    printf '%s' "$file"
+    return 0
+  fi
+
+  mkdir -p "$cache_dir" && chmod 700 "${RUNTIME_CACHE}/modules" "$cache_dir" 2>/dev/null || true
+  tmp="$(mktemp "${cache_dir}/.${name}.XXXXXX")" || return 1
+  if ! curl --proto '=https' --tlsv1.2 -fsSL "${RNM_RAW_URL}/modules/${name}.sh" -o "$tmp"; then
+    rm -f "$tmp"
+    err "Не удалось скачать модуль ${name} из ${RNM_REPO}@${RNM_REF}."
+    return 1
+  fi
+  if ! bash -n "$tmp" || ! module_version_ok "$tmp"; then
+    rm -f "$tmp"
+    err "Модуль ${name} не совпадает с версией ${SCRIPT_VERSION}. Обнови скрипт (или команду remnanode)."
+    return 1
+  fi
+  mv -f "$tmp" "$file"
+  printf '%s' "$file"
+}
+
+load_module() {
+  local name="$1" file
+  [[ "$RNM_MODULES_LOADED" == *" ${name} "* ]] && return 0
+  [[ "$name" =~ ^[a-z0-9-]+$ ]] || die "Некорректное имя модуля: ${name}"
+  file="$(module_path "$name")" || die "Модуль ${name} недоступен."
+  # shellcheck source=/dev/null
+  source "$file"
+  RNM_MODULES_LOADED+="${name} "
+}
+
+# Загружает модуль и открывает его меню. Если модуль недоступен (нет сети,
+# несовпадение версии), остаёмся в главном меню.
+open_module_menu() {
+  local module="$1" menu="$2"
+  if ( load_module "$module" ) >/dev/null; then
+    load_module "$module"
+    "$menu"
+  else
+    pause
+  fi
+}
+
+# Загружает модуль и вызывает его функцию (для run_action).
+with_module() {
+  local module="$1"
+  shift
+  load_module "$module"
+  "$@"
+}
+
+# Скачивает сторонний установщик во временный файл, показывает источник и
+# sha256 и запускает только после подтверждения.
+run_remote_installer() {
+  local url="$1"
+  shift
+  local tmp
+  tmp="$(mktemp /tmp/remnanode-module.XXXXXX.sh)"
+  curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$tmp" || { rm -f "$tmp"; die "Не удалось скачать ${url}"; }
+  bash -n "$tmp" || { rm -f "$tmp"; die "Скачанный скрипт не прошёл проверку синтаксиса."; }
+  echo
+  info "Источник: ${url}"
+  info "SHA256:   $(sha256sum "$tmp" | cut -d' ' -f1)"
+  warn "Это сторонний скрипт; он будет выполнен от root."
+  if ! confirm "Запустить установщик?"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  local status=0
+  bash "$tmp" "$@" || status=$?
+  rm -f "$tmp"
+  return "$status"
+}
+
+# Включает/выключает outbound модуля в профиле без удаления самого модуля.
+toggle_outbound() {
+  local variable="$1"
+  load_state
+  if [[ "${!variable}" == "1" ]]; then
+    printf -v "$variable" '%s' 0
+  else
+    printf -v "$variable" '%s' 1
+  fi
+  [[ "$WARP_OUTBOUND" != "1" && "$RU_POLICY" == "warp" ]] && RU_POLICY="block"
+  save_state
+  ok "${variable}=${!variable}"
+  generate_xray_profile 1
+}
+
+# ---------------------------------------------------------------------------
+# Сценарии установки
+# ---------------------------------------------------------------------------
+
+prompt_domain_and_site() {
+  local default_domain="${1:-}"
+
+  local domain_input
+  read -r -p "Домен ноды${default_domain:+ [${default_domain}]}: " domain_input
+  DOMAIN="${domain_input:-$default_domain}"
+  validate_domain "$DOMAIN" || die "Некорректный домен: ${DOMAIN}"
+
+  local email_input
+  read -r -p "Email Let's Encrypt/acme.sh${ACME_EMAIL:+ [${ACME_EMAIL}]}: " email_input
+  ACME_EMAIL="${email_input:-$ACME_EMAIL}"
+  validate_email "$ACME_EMAIL" || die "Некорректный email."
+
+  local dir
+  load_module sites
+  dir="$(templates_dir)" || die "Каталог шаблонов недоступен."
+  SITE_TEMPLATE="$(select_template "$dir")"
+  prompt_brand "$SERVICE_NAME"
+}
+
+offer_geo_routing() {
+  echo
+  info "Routing: РФ + белые списки → напрямую у клиента, торренты → блок, остальное → прокси."
+  if confirm "Подключить roscomvpn geosite/geoip на ноде (ежедневное автообновление)?"; then
+    load_module routing
+    geo_enable || warn "Geo не подключён — используются встроенные geosite/geoip."
+  fi
+}
+
+install_node_basic() {
+  ensure_fresh_install_target
+  prompt_secret_and_panel
+  install_base_packages
+  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
+  install_docker
+
+  ensure_base_dirs
+
+  INSTALL_MODE="basic"
+  DOMAIN=""
+  SERVICE_NAME=""
+  ACME_EMAIL=""
+  SITE_TEMPLATE=""
+
+  RAW_ENABLED="0"
+  XHTTP_ENABLED="0"
+  HY2_ENABLED="0"
+
+  ensure_selected_ports_free
+
+  write_basic_compose
+  configure_firewall "basic"
+
+  start_stack
+  verify_basic
+  save_state
+
+  ok "Remna Node установлена."
+  offer_geo_routing
+  generate_xray_profile 1 || true
+  echo
+  warn "Inbound'ы для этой ноды настраиваются в Panel. Routing-профиль ${PROFILE_FILE} можно применить к профилю панели режимом merge (меню Panel API)."
+}
+
+install_node_selfsteal() {
+  ensure_fresh_install_target
+  prompt_secret_and_panel
+
+  ACME_EMAIL=""
+  prompt_domain_and_site ""
+
+  echo
+  prompt_inbounds
+
+  install_base_packages
+  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
+  install_docker
+  ensure_base_dirs
+
+  validate_selected_port_plan
+  ensure_selected_ports_free
+
+  INSTALL_MODE="selfsteal"
+
+  deploy_site "$SITE_TEMPLATE" "$DOMAIN"
+  write_nginx_conf "$DOMAIN"
+  write_selfsteal_compose
+  save_state
+
+  tune_hysteria_udp
+
+  configure_firewall "selfsteal"
+
+  issue_certificate "$DOMAIN" "$ACME_EMAIL"
+
+  start_stack
+  verify_basic
+  verify_selfsteal_local
+
+  save_state
+  offer_geo_routing
+  generate_xray_profile 1
+  save_state
+
+  echo
+  ok "Remna Node + SSL + Selfsteal установлена."
+  echo
+  echo "Generated profile: ${PROFILE_FILE}"
+  echo "Connection info:    ${PROFILE_INFO}"
+  echo
+  warn "Следующий шаг: добавь ${PROFILE_FILE} в Remnawave Panel (или меню «Remnawave Panel API») и назначь профиль этой ноде."
+}
+
+install_selfsteal_for_existing_node() {
+  command -v docker >/dev/null 2>&1 || die "Docker не установлен. Существующая RemnaNode не найдена."
+  docker compose version >/dev/null 2>&1 || die "Docker Compose не установлен."
+  detect_os
+
+  detect_existing_compose
+  prompt_panel_network
+
+  ACME_EMAIL=""
+  prompt_domain_and_site ""
+
+  echo
+  prompt_inbounds
+
+  install_base_packages
+  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
+  ensure_base_dirs
+  validate_selected_port_plan
+
+  INSTALL_MODE="selfsteal-existing"
+
+  deploy_site "$SITE_TEMPLATE" "$DOMAIN"
+  write_nginx_conf "$DOMAIN"
+  compose_edit selfsteal-add
+  save_state
+
+  tune_hysteria_udp
+  configure_firewall "selfsteal"
+  issue_certificate "$DOMAIN" "$ACME_EMAIL"
+
+  start_stack
+  verify_basic
+  verify_selfsteal_local
+
+  save_state
+  offer_geo_routing
+  generate_xray_profile 1
+  save_state
+
+  echo
+  ok "SSL / Selfsteal добавлен к существующей RemnaNode."
+  echo "Compose:            ${NODE_COMPOSE_FILE}"
+  echo "Generated profile:  ${PROFILE_FILE}"
+  echo "Connection info:    ${PROFILE_INFO}"
+  echo
+  warn "Следующий шаг: добавь ${PROFILE_FILE} в Remnawave Panel и назначь профиль этой ноде."
 }
 
 configure_inbounds_existing() {
@@ -2122,95 +3235,64 @@ configure_inbounds_existing() {
   warn "Manager только генерирует профиль. Его нужно сохранить/запушить в Remnawave Panel."
 }
 
-prompt_domain_and_site() {
-  local default_domain="${1:-}"
-  local default_service="${2:-}"
-
-  local domain_input
-  read -r -p "Домен ноды${default_domain:+ [${default_domain}]}: " domain_input
-  DOMAIN="${domain_input:-$default_domain}"
-  validate_domain "$DOMAIN" || die "Некорректный домен: ${DOMAIN}"
-
-  local service_input
-  read -r -p "Название сервиса для cloud-заглушки${default_service:+ [${default_service}]} (Enter = домен): " service_input
-
-  if [[ -n "$service_input" ]]; then
-    SERVICE_NAME="$service_input"
-  elif [[ -n "$default_service" ]]; then
-    SERVICE_NAME="$default_service"
-  else
-    SERVICE_NAME="$DOMAIN"
-  fi
-
-  validate_service_name "$SERVICE_NAME" || die "Название сервиса содержит неподдерживаемые символы."
-
-  local email_input
-  read -r -p "Email Let's Encrypt/acme.sh${ACME_EMAIL:+ [${ACME_EMAIL}]}: " email_input
-  ACME_EMAIL="${email_input:-$ACME_EMAIL}"
-  validate_email "$ACME_EMAIL" || die "Некорректный email."
-}
-
 change_domain() {
   load_state
 
   is_selfsteal_mode || die "Домен не настроен этим manager."
 
   local old_domain="$DOMAIN"
-  local old_service="$SERVICE_NAME"
+  local domain_input email_input
 
   echo "Текущий домен: ${old_domain}"
-  echo "Текущее название: ${old_service}"
+  read -r -p "Новый домен [${old_domain}]: " domain_input
+  DOMAIN="${domain_input:-$old_domain}"
+  validate_domain "$DOMAIN" || die "Некорректный домен: ${DOMAIN}"
 
-  prompt_domain_and_site "$old_domain" "$old_service"
-
-  if [[ "$DOMAIN" == "$old_domain" && "$SERVICE_NAME" == "$old_service" ]]; then
+  if [[ "$DOMAIN" == "$old_domain" ]]; then
     warn "Изменений нет."
     return 0
   fi
 
-  check_domain_dns "$DOMAIN"
+  read -r -p "Email Let's Encrypt [${ACME_EMAIL}]: " email_input
+  ACME_EMAIL="${email_input:-$ACME_EMAIL}"
+  validate_email "$ACME_EMAIL" || die "Некорректный email."
 
-  if [[ "$DOMAIN" != "$old_domain" ]]; then
-    issue_certificate "$DOMAIN" "$ACME_EMAIL"
-  fi
+  check_domain_dns "$DOMAIN"
+  issue_certificate "$DOMAIN" "$ACME_EMAIL"
 
   write_nginx_conf "$DOMAIN"
-  write_site_files "$DOMAIN" "$SERVICE_NAME"
+  load_module sites
+  deploy_site "${SITE_TEMPLATE:-}" "$DOMAIN"
   generate_xray_profile 1
   save_state
 
   docker restart nginx-selfsteal >/dev/null 2>&1 || true
 
-  if [[ "$DOMAIN" != "$old_domain" && -x "$ACME_BIN" ]]; then
-    if confirm "Убрать старый ${old_domain} из acme.sh auto-renew?"; then
-      "$ACME_BIN" --remove -d "$old_domain" --ecc || true
-    fi
+  if [[ -x "$ACME_BIN" ]] && confirm "Убрать старый ${old_domain} из acme.sh auto-renew?"; then
+    "$ACME_BIN" --remove -d "$old_domain" --ecc || true
   fi
 
-  ok "Домен/название изменены."
-  warn "Не забудь обновить serverNames/Host в Remnawave Panel новым profile."
+  ok "Домен изменён."
+  warn "Обнови serverNames/SNI в Remnawave Panel новым profile."
 }
 
 ssl_menu() {
   load_state
 
-  is_selfsteal_mode || {
-    err "SSL/Selfsteal не настроен."
-    pause
-    return
-  }
+  is_selfsteal_mode || die "SSL/Selfsteal не настроен."
 
   while true; do
     clear || true
-    echo -e "${C_BOLD}SSL / acme.sh${C_RESET}"
+    echo -e "${C_BOLD}Домен и SSL / acme.sh${C_RESET}"
     echo
-    echo "Domain: ${DOMAIN}"
+    echo "Domain: ${DOMAIN}   Осталось дней: $(cert_days_left 2>/dev/null || echo '?')"
     echo
     echo "1. Показать сертификат"
     echo "2. Renew если пора"
     echo "3. Принудительный renew"
     echo "4. Повторно установить сертификат в /opt/remnanode/ssl"
     echo "5. Показать acme.sh --info"
+    echo "6. Изменить домен"
     echo
     echo "0. Назад"
     echo
@@ -2221,41 +3303,18 @@ ssl_menu() {
     case "$choice" in
       1)
         openssl x509 -in "${BASE_DIR}/ssl/fullchain.pem" \
-          -noout -subject -issuer -dates -ext subjectAltName
+          -noout -subject -issuer -dates -ext subjectAltName || true
         pause
         ;;
-      2)
-        renew_certificate "0"
-        pause
-        ;;
-      3)
-        renew_certificate "1"
-        pause
-        ;;
-      4)
-        install_cert_files "$DOMAIN"
-        pause
-        ;;
-      5)
-        "$ACME_BIN" --info -d "$DOMAIN" --ecc || true
-        pause
-        ;;
+      2) run_action renew_certificate "0"; pause ;;
+      3) run_action renew_certificate "1"; pause ;;
+      4) run_action install_cert_files "$DOMAIN"; pause ;;
+      5) "$ACME_BIN" --info -d "$DOMAIN" --ecc || true; pause ;;
+      6) run_action change_domain; load_state; pause ;;
       0) return 0 ;;
       *) ;;
     esac
   done
-}
-
-update_node() {
-  load_state
-  [[ -f "$NODE_COMPOSE_FILE" ]] || die "Compose-файл Node отсутствует: ${NODE_COMPOSE_FILE}"
-
-  info "Обновляю Docker images..."
-  manager_compose pull
-  manager_compose up -d --remove-orphans
-
-  ok "Контейнеры обновлены."
-  verify_basic
 }
 
 remove_node() {
@@ -2267,6 +3326,7 @@ remove_node() {
     warn "Будут остановлены контейнеры RemnaNode/Nginx и при подтверждении удалён ${BASE_DIR}."
   fi
   echo
+  local token
   read -r -p "Для продолжения введи DELETE: " token
   [[ "$token" == "DELETE" ]] || {
     warn "Отменено."
@@ -2275,7 +3335,7 @@ remove_node() {
 
   if [[ "$INSTALL_MODE" == "selfsteal-existing" ]]; then
     docker rm -f nginx-selfsteal >/dev/null 2>&1 || true
-    update_existing_compose remove
+    compose_edit selfsteal-remove
     manager_compose up -d "$NODE_SERVICE_NAME" || true
   elif [[ -f "$NODE_COMPOSE_FILE" ]]; then
     manager_compose down --remove-orphans || true
@@ -2290,6 +3350,12 @@ remove_node() {
   rm -f "$RELOAD_HELPER"
   rm -f /etc/sysctl.d/99-remnanode-hysteria.conf
   sysctl --system >/dev/null 2>&1 || true
+
+  if [[ "$INSTALL_MODE" != "selfsteal-existing" ]]; then
+    systemctl disable --now remnanode-geo-update.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/remnanode-geo-update.{service,timer} "$GEO_UPDATER"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
 
   if [[ -f "$UFW_STATE_FILE" ]] || ufw status 2>/dev/null | grep -q remnanode-manager; then
     remove_managed_ufw_rules
@@ -2306,310 +3372,148 @@ remove_node() {
       "$PROFILE_FILE" \
       "$PROFILE_INFO"
     ok "Selfsteal отключён; существующая Node и её данные сохранены."
-  elif confirm "Удалить все файлы ${BASE_DIR}?"; then
+  elif confirm_no_default "Удалить все файлы ${BASE_DIR} (включая бэкапы)?"; then
     rm -rf "$BASE_DIR"
   fi
 
-  warn "Docker и общие правила UFW/SSH не удалялись. Правила с меткой remnanode-manager удалены."
+  warn "Docker, WARP/Psiphon/Tor/Zapret2 и общие правила UFW/SSH не удалялись. Правила с меткой remnanode-manager удалены."
   ok "Удаление завершено."
-
-  INSTALL_MODE=""
-  DOMAIN=""
-  NODE_COMPOSE_FILE="${BASE_DIR}/docker-compose.yml"
-  NODE_SERVICE_NAME="remnanode"
 }
 
-install_node_basic() {
-  ensure_fresh_install_target
-  prompt_secret_and_panel
-  install_base_packages
-  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
-  install_docker
-
-  ensure_base_dirs
-
-  INSTALL_MODE="basic"
-  DOMAIN=""
-  SERVICE_NAME=""
-  ACME_EMAIL=""
-
-  RAW_ENABLED="0"
-  XHTTP_ENABLED="0"
-  HY2_ENABLED="0"
-
-  ensure_selected_ports_free
-
-  write_basic_compose
-  configure_firewall "basic"
-
-  start_stack
-  verify_basic
-  save_state
-
-  ok "Remna Node установлен."
+profile_menu() {
+  while true; do
+    clear || true
+    load_state
+    print_header
+    echo -e "${C_BOLD}Xray profile и inbound'ы${C_RESET}"
+    echo
+    echo "RAW: $([[ "$RAW_ENABLED" == 1 ]] && echo "${RAW_PORT}/tcp" || echo выкл)   XHTTP: $([[ "$XHTTP_ENABLED" == 1 ]] && echo "${XHTTP_PORT}/tcp ${XHTTP_MODE}" || echo выкл)   Hysteria2: $([[ "$HY2_ENABLED" == 1 ]] && echo "${HY2_PORT}/udp" || echo выкл)"
+    echo
+    echo "1. Параметры подключения (profile-info)"
+    echo "2. Показать JSON профиля"
+    echo "3. Настроить inbound'ы заново"
+    echo "4. Пересобрать профиль"
+    echo "5. Проверить профиль Xray внутри ноды"
+    echo "6. Отправить профиль в Panel"
+    echo "7. Сгенерировать новую Reality keypair"
+    echo "8. Сгенерировать новые Short IDs"
+    echo
+    echo "0. Назад"
+    echo
+    local choice
+    read -r -p "Выбор: " choice
+    case "$choice" in
+      1) run_action show_profile_info; pause ;;
+      2) run_action print_profile_json | less -R || true ;;
+      3) run_action configure_inbounds_existing; pause ;;
+      4) run_action generate_xray_profile; pause ;;
+      5) run_action validate_generated_profile; pause ;;
+      6) run_action with_module panel panel_push_profile; pause ;;
+      7) run_action rotate_reality_keys; pause ;;
+      8) run_action regenerate_short_ids; pause ;;
+      0) return 0 ;;
+      *) ;;
+    esac
+  done
 }
 
-install_node_selfsteal() {
-  ensure_fresh_install_target
-  prompt_secret_and_panel
-
-  ACME_EMAIL=""
-  prompt_domain_and_site "" ""
-
-  echo
-  prompt_inbounds
-
-  install_base_packages
-  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
-  install_docker
-  ensure_base_dirs
-
-  validate_selected_port_plan
-  ensure_selected_ports_free
-
-  INSTALL_MODE="selfsteal"
-
-  write_site_files "$DOMAIN" "$SERVICE_NAME"
-  write_nginx_conf "$DOMAIN"
-  write_selfsteal_compose
-
-  tune_hysteria_udp
-
-  configure_firewall "selfsteal"
-
-  issue_certificate "$DOMAIN" "$ACME_EMAIL"
-
-  start_stack
-  verify_basic
-  verify_selfsteal_local
-
-  generate_xray_profile 1
-  save_state
-
-  echo
-  ok "Remna Node + SSL + Selfsteal установлен."
-  echo
-  echo "Generated profile: ${PROFILE_FILE}"
-  echo "Connection info:    ${PROFILE_INFO}"
-  echo
-  warn "Следующий шаг: добавь ${PROFILE_FILE} в Remnawave Panel и назначь профиль этой ноде."
-}
-
-install_selfsteal_for_existing_node() {
-  command -v docker >/dev/null 2>&1 || die "Docker не установлен. Существующая RemnaNode не найдена."
-  docker compose version >/dev/null 2>&1 || die "Docker Compose не установлен."
-
-  detect_existing_compose
-  prompt_panel_network
-
-  ACME_EMAIL=""
-  prompt_domain_and_site "" ""
-
-  echo
-  prompt_inbounds
-
-  install_base_packages
-  validate_panel_network "$PANEL_IP" || die "Некорректный IP или CIDR сервера панели: ${PANEL_IP}"
-  ensure_base_dirs
-  validate_selected_port_plan
-
-  INSTALL_MODE="selfsteal-existing"
-
-  write_site_files "$DOMAIN" "$SERVICE_NAME"
-  write_nginx_conf "$DOMAIN"
-  update_existing_compose add
-  save_state
-
-  tune_hysteria_udp
-  configure_firewall "selfsteal"
-  issue_certificate "$DOMAIN" "$ACME_EMAIL"
-
-  start_stack
-  verify_basic
-  verify_selfsteal_local
-
-  generate_xray_profile 1
-  save_state
-
-  echo
-  ok "SSL / Selfsteal добавлен к существующей RemnaNode."
-  echo "Compose:            ${NODE_COMPOSE_FILE}"
-  echo "Generated profile:  ${PROFILE_FILE}"
-  echo "Connection info:    ${PROFILE_INFO}"
-  echo
-  warn "Следующий шаг: добавь ${PROFILE_FILE} в Remnawave Panel и назначь профиль этой ноде."
-}
-
-show_files() {
-  echo
-  echo "${BASE_DIR}/"
-  echo "├── docker-compose.yml"
-  echo "├── installer.conf"
-  echo "├── ufw.rules"
-  echo "├── nginx.conf"
-  echo "├── reality.env"
-  echo "├── ssl/"
-  echo "│   ├── fullchain.pem"
-  echo "│   └── privkey.pem"
-  echo "├── html/"
-  echo "│   ├── index.html"
-  echo "│   ├── style.css"
-  echo "│   ├── favicon.svg"
-  echo "│   ├── robots.txt"
-  echo "│   └── 404.html"
-  echo "└── profiles/"
-  echo "    ├── xray-profile.json"
-  echo "    └── profile-info.txt"
-}
+# ---------------------------------------------------------------------------
+# Главное меню и CLI
+# ---------------------------------------------------------------------------
 
 show_menu() {
   clear || true
+  print_header
+  cat <<'EOF'
+ УСТАНОВКА                               NODE
+  1. RemnaNode (только нода)              5. Управление Node: версии, обновление, откат
+  2. RemnaNode + Selfsteal + SSL          6. Xray profile, inbound'ы, Reality
+  3. Selfsteal к установленной Node       7. Домен и SSL
+  4. Удалить стек / Selfsteal             8. Сайт-заглушка: шаблоны и отпечаток
 
-  load_state
+ ROUTING И МОДУЛИ                        СЕРВЕР
+  9. Routing: roscomvpn, РФ, торренты    15. Мониторинг и логи
+ 10. WARP                                16. Администрирование
+ 11. Psiphon                             17. Бэкапы
+ 12. Tor
+ 13. Zapret2
+ 14. Remnawave Panel API
 
-  echo -e "${C_BOLD}Remnawave Node Manager${C_RESET} ${C_CYAN}v${SCRIPT_VERSION}${C_RESET}"
-
-  if [[ -n "${INSTALL_MODE:-}" ]]; then
-    echo "Installed: ${INSTALL_MODE}${DOMAIN:+ | ${DOMAIN}}"
-  fi
-
-  echo
-  echo "1. Установить Remna Node"
-  echo "2. Установить Remna Node + SSL / Selfsteal / сайт-заглушку"
-  echo "3. Добавить SSL / Selfsteal / сайт-заглушку к установленной Remna Node"
-  echo
-  echo "4. Обновить RemnaNode / контейнеры"
-  echo "5. SSL / сертификаты"
-  echo "6. Диагностика Node / Selfsteal"
-  echo "7. Показать Reality keys / параметры профиля"
-  echo "8. Настроить inbound'ы / пересобрать Xray profile"
-  echo "9. Изменить домен / название cloud-заглушки"
-  echo "10. Сгенерировать новую Reality keypair"
-  echo "11. Показать структуру файлов"
-  echo "12. Удалить установленный стек / Selfsteal"
-  echo "13. Установить / обновить модульный CLI remnanode"
-  echo
-  echo "0. Выход"
+  0. Выход
+EOF
   echo
 }
 
-install_manager_cli() {
-  local target="/opt/remnanode-manager" entry="/usr/local/bin/remnanode" source_dir="$SCRIPT_DIR" temp_dir="" entry_tmp
-  if [[ ! -f "${source_dir}/remnanode" || ! -d "${source_dir}/lib" ]]; then
-    temp_dir="$(mktemp -d /tmp/remnanode-manager-bootstrap.XXXXXX)"
-    info "Загружаю полный архив RemnaNode Manager..."
-    curl --proto '=https' --tlsv1.2 -fsSL \
-      "https://codeload.github.com/OverlayNode/Remnanode-manager/tar.gz/refs/heads/main" \
-      -o "${temp_dir}/manager.tar.gz" \
-      || { rm -rf -- "$temp_dir"; die "Не удалось скачать архив manager."; }
-    tar -xzf "${temp_dir}/manager.tar.gz" -C "$temp_dir"
-    source_dir="${temp_dir}/Remnanode-manager-main"
-    [[ -f "${source_dir}/remnanode" && -f "${source_dir}/VERSION" && -d "${source_dir}/lib" ]] \
-      || { rm -rf -- "$temp_dir"; die "Загруженный архив не содержит ожидаемую структуру."; }
-    bash -n "${source_dir}/install.sh" "${source_dir}/remnanode" "${source_dir}"/lib/*.sh \
-      || { rm -rf -- "$temp_dir"; die "Загруженные shell-файлы не прошли syntax validation."; }
-  fi
-  install_base_packages
-  install -d -m 755 "$target" "$target/lib" "$target/data" "$target/templates" \
-    "$target/templates/snippets" "$target/templates/selfsteal"
-  [[ -f "$target/VERSION" ]] && backup_file "$target/VERSION"
-  install -m 755 "${source_dir}/remnanode" "$target/remnanode"
-  install -m 755 "${source_dir}/install.sh" "$target/install.sh"
-  install -m 644 "${source_dir}/VERSION" "$target/VERSION"
-  install -m 644 "${source_dir}"/lib/*.sh "$target/lib/"
-  install -m 644 "${source_dir}"/data/*.json "$target/data/"
-  install -m 644 "${source_dir}"/templates/snippets/*.json "$target/templates/snippets/"
-  install -m 644 "${source_dir}"/templates/selfsteal/* "$target/templates/selfsteal/"
-  entry_tmp="$(mktemp /tmp/remnanode-entry.XXXXXX)"
-  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$target/remnanode" >"$entry_tmp"
-  chmod 755 "$entry_tmp"
-  rm -f -- "$entry"
-  install -m 755 "$entry_tmp" "$entry"
-  rm -f -- "$entry_tmp"
-  [[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"
-  ok "Manager установлен: ${entry}"
-  info "Запуск: remnanode status | remnanode menu"
-}
-
-main() {
-  require_root
-  detect_os
-
-  if [[ "${1:-}" == "install-manager" ]]; then
-    install_manager_cli
-    return 0
-  fi
-
-  touch "$INSTALL_LOG"
-  chmod 600 "$INSTALL_LOG"
+main_menu() {
+  touch "$INSTALL_LOG" 2>/dev/null || true
+  chmod 600 "$INSTALL_LOG" 2>/dev/null || true
+  mkdir -p "$RUNTIME_CACHE" 2>/dev/null || true
 
   while true; do
     show_menu
 
     local choice
-    read -r -p "Выбери пункт: " choice
+    read -r -p "Выбери пункт: " choice || exit 0
 
     case "$choice" in
-      1)
-        install_node_basic
-        pause
-        ;;
-      2)
-        install_node_selfsteal
-        pause
-        ;;
-      3)
-        install_selfsteal_for_existing_node
-        pause
-        ;;
-      4)
-        update_node
-        pause
-        ;;
-      5)
-        ssl_menu
-        ;;
-      6)
-        diagnostics
-        pause
-        ;;
-      7)
-        show_profile_info
-        pause
-        ;;
-      8)
-        configure_inbounds_existing
-        pause
-        ;;
-      9)
-        change_domain
-        pause
-        ;;
-      10)
-        rotate_reality_keys
-        pause
-        ;;
-      11)
-        show_files
-        pause
-        ;;
-      12)
-        remove_node
-        pause
-        ;;
-      13)
-        install_manager_cli
-        pause
-        ;;
-      0)
-        exit 0
-        ;;
-      *)
-        warn "Неизвестный пункт."
-        sleep 1
-        ;;
+      1) run_action install_node_basic; pause ;;
+      2) run_action install_node_selfsteal; pause ;;
+      3) run_action install_selfsteal_for_existing_node; pause ;;
+      4) run_action remove_node; pause ;;
+      5) node_menu ;;
+      6) profile_menu ;;
+      7) run_action ssl_menu ;;
+      8) open_module_menu sites site_menu ;;
+      9) open_module_menu routing routing_menu ;;
+      10) open_module_menu warp warp_menu ;;
+      11) open_module_menu psiphon psiphon_menu ;;
+      12) open_module_menu tor tor_menu ;;
+      13) open_module_menu zapret zapret_menu ;;
+      14) open_module_menu panel panel_menu ;;
+      15) open_module_menu monitor monitoring_menu ;;
+      16) open_module_menu admin admin_menu ;;
+      17) open_module_menu admin backup_menu ;;
+      0|q|Q) exit 0 ;;
+      *) ;;
     esac
   done
+}
+
+usage() {
+  cat <<EOF
+RemnaNode Manager ${SCRIPT_VERSION}
+
+Использование: install.sh [КОМАНДА]
+
+  menu              интерактивное меню (по умолчанию)
+  status            шапка со статусом Node/Xray/Selfsteal/Panel и метриками
+  install-command   установить команду remnanode в /usr/local/bin
+  geo-update        обновить roscomvpn geo-файлы
+  site-refresh      перегенерировать сайт-заглушку с новым отпечатком
+  profile           пересобрать Xray profile
+  help              эта справка
+EOF
+}
+
+main() {
+  local command="${1:-menu}"
+
+  case "$command" in
+    help|-h|--help) usage; return 0 ;;
+  esac
+
+  require_root
+  detect_os
+
+  case "$command" in
+    menu) ensure_runtime_tools; main_menu ;;
+    status) print_header ;;
+    install-command|install-manager) load_module admin; install_command ;;
+    geo-update) load_module routing; geo_update_now ;;
+    site-refresh) load_module sites; load_state; deploy_site "${SITE_TEMPLATE:-}" "$DOMAIN" ;;
+    profile) generate_xray_profile ;;
+    *) usage >&2; return 2 ;;
+  esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

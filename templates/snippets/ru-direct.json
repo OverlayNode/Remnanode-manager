@@ -1,1 +1,0 @@
-{"id":"ru-direct","name":"RU direct","type":"routing","version":1,"enabled":false,"managedBy":"remnanode-manager","requires":["freedom-direct"],"config":{"routing":{"rules":[{"type":"field","ip":["geoip:ru"],"domain":["geosite:category-ru"],"outboundTag":"DIRECT"}]}}}

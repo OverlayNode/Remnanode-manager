@@ -1,1 +1,0 @@
-{"id":"private-networks-block","name":"Block private networks","type":"routing","version":1,"enabled":true,"managedBy":"remnanode-manager","requires":["blackhole"],"config":{"routing":{"rules":[{"type":"field","ip":["geoip:private"],"outboundTag":"BLOCK"},{"type":"field","domain":["geosite:private"],"outboundTag":"BLOCK"}]}}}

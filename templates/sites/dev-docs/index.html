@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Getting started — __BRAND__ Docs</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="__P__top">
+    <a class="__P__logo" href="/"><span class="__P__logo-badge">{ }</span>__BRAND__ <em>Docs</em></a>
+    <div class="__P__search"><input type="search" placeholder="Search documentation…" aria-label="Search documentation" data-search><kbd>/</kbd></div>
+    <nav class="__P__top-links"><a href="#api">API reference</a><a href="#sdk">SDKs</a><a href="#changelog">Changelog</a><span class="__P__version">v__VERSION__</span></nav>
+  </header>
+
+  <div class="__P__shell">
+    <aside class="__P__side" data-nav>
+      <p class="__P__side-title">Getting started</p>
+      <a class="__P__active" href="#intro">Introduction</a>
+      <a href="#auth">Authentication</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="#limits">Rate limits</a>
+      <p class="__P__side-title">Core concepts</p>
+      <a href="#projects">Projects</a>
+      <a href="#environments">Environments</a>
+      <a href="#webhooks">Webhooks</a>
+      <a href="#events">Event streams</a>
+      <p class="__P__side-title">Reference</p>
+      <a href="#api">REST API</a>
+      <a href="#sdk">Client SDKs</a>
+      <a href="#errors">Error codes</a>
+      <a href="#changelog">Changelog</a>
+    </aside>
+
+    <main class="__P__content">
+      <p class="__P__crumbs">Docs / Getting started</p>
+      <h1 id="intro">Introduction</h1>
+      <p class="__P__lead">__BRAND__ provides a programmable platform for deploying and observing services at the edge. This guide walks you through authentication, your first request and the core objects of the API.</p>
+
+      <div class="__P__callout"><strong>Base URL</strong><code>https://__DOMAIN__/v2</code></div>
+
+      <h2 id="auth">Authentication</h2>
+      <p>All requests are authenticated with a project token passed in the <code>Authorization</code> header. Tokens are scoped to a single environment and can be rotated at any time.</p>
+<pre class="__P__code"><span class="__P__c">$</span> curl https://__DOMAIN__/v2/projects \
+    -H <span class="__P__s">"Authorization: Bearer $API_TOKEN"</span></pre>
+
+      <h2 id="quickstart">Quickstart</h2>
+      <p>Install the SDK for your language and create a client. The SDK retries idempotent requests automatically and exposes typed responses.</p>
+<pre class="__P__code"><span class="__P__k">import</span> { Client } <span class="__P__k">from</span> <span class="__P__s">"@__BRAND_SLUG__/sdk"</span>;
+
+<span class="__P__k">const</span> client = <span class="__P__k">new</span> Client({ token: process.env.API_TOKEN });
+<span class="__P__k">const</span> projects = <span class="__P__k">await</span> client.projects.list({ limit: <span class="__P__n">20</span> });
+console.log(projects.data.length);</pre>
+
+      <h2 id="limits">Rate limits</h2>
+      <table class="__P__table">
+        <thead><tr><th>Plan</th><th>Requests / min</th><th>Burst</th></tr></thead>
+        <tbody>
+          <tr><td>Developer</td><td>600</td><td>100</td></tr>
+          <tr><td>Team</td><td>3 000</td><td>500</td></tr>
+          <tr><td>Enterprise</td><td>Custom</td><td>Custom</td></tr>
+        </tbody>
+      </table>
+
+      <div class="__P__pager"><span></span><a href="#projects">Next: Projects →</a></div>
+    </main>
+
+    <aside class="__P__toc">
+      <p>On this page</p>
+      <a href="#intro">Introduction</a>
+      <a href="#auth">Authentication</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="#limits">Rate limits</a>
+    </aside>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

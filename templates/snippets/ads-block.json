@@ -1,1 +1,0 @@
-{"id":"ads-block","name":"Block ads","type":"routing","version":1,"enabled":false,"managedBy":"remnanode-manager","requires":["blackhole"],"config":{"routing":{"rules":[{"type":"field","domain":["geosite:category-ads-all"],"outboundTag":"BLOCK"}]}}}

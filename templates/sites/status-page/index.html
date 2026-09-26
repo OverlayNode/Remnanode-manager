@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>__BRAND__ Status</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="__P__header">
+    <div class="__P__wrap __P__header-row">
+      <a class="__P__logo" href="/"><span class="__P__logo-mark"></span>__BRAND__ <span class="__P__logo-sub">status</span></a>
+      <nav class="__P__links"><a href="#components">Components</a><a href="#history">Incident history</a></nav>
+    </div>
+  </header>
+
+  <main class="__P__wrap">
+    <section class="__P__banner">
+      <span class="__P__banner-icon">✓</span>
+      <div>
+        <h1>All systems operational</h1>
+        <p>Last updated <span data-updated>a few seconds ago</span> · __DOMAIN__</p>
+      </div>
+    </section>
+
+    <section class="__P__panel" id="components">
+      <div class="__P__panel-head">
+        <h2>Components</h2>
+        <span class="__P__legend">Uptime over the past 90 days</span>
+      </div>
+      <div class="__P__components" data-components></div>
+    </section>
+
+    <section class="__P__grid">
+      <div class="__P__metric"><small>API response time</small><strong data-latency>84 ms</strong><span>p50, all regions</span></div>
+      <div class="__P__metric"><small>Requests served (24h)</small><strong data-requests>18.2M</strong><span>edge + origin</span></div>
+      <div class="__P__metric"><small>Active regions</small><strong>7 / 7</strong><span>no degradation</span></div>
+    </section>
+
+    <section class="__P__panel" id="history">
+      <div class="__P__panel-head"><h2>Past incidents</h2></div>
+      <div class="__P__incidents" data-incidents></div>
+    </section>
+  </main>
+
+  <footer class="__P__footer __P__wrap">
+    <span>© __YEAR__ __BRAND__ · Status page v__VERSION__</span>
+    <a href="/">Back to top</a>
+  </footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

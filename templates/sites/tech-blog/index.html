@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Engineering stories from the __BRAND__ team.">
+  <title>__BRAND__ Engineering Blog</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="__P__head">
+    <a class="__P__mast" href="/">__BRAND__ <em>Engineering</em></a>
+    <nav><a href="#latest">Latest</a><a href="#topics">Topics</a><a href="#about">About</a></nav>
+  </header>
+
+  <main class="__P__wrap">
+    <article class="__P__feature">
+      <img src="/assets/cover1.svg" alt="" width="800" height="420">
+      <div>
+        <span class="__P__topic">Infrastructure</span>
+        <h1>How we cut p99 latency in half by rethinking our service mesh</h1>
+        <p>Moving from sidecars to a node-level proxy removed two network hops from every request. Here is what broke along the way and what we would do differently.</p>
+        <p class="__P__byline"><span data-author>Maya Lindqvist</span> · <span data-date>—</span> · 12 min read</p>
+      </div>
+    </article>
+
+    <section class="__P__grid" id="latest">
+      <article><img src="/assets/cover2.svg" alt="" width="400" height="240"><span class="__P__topic">Rust</span><h2>Zero-copy request parsing in production</h2><p>Borrowing tricks that let our edge proxy handle 40% more requests per core.</p><small data-date>—</small></article>
+      <article><img src="/assets/cover3.svg" alt="" width="400" height="240"><span class="__P__topic">Data</span><h2>Our metrics pipeline, one billion points later</h2><p>What we learned running a columnar time-series store on commodity disks.</p><small data-date>—</small></article>
+      <article><img src="/assets/cover4.svg" alt="" width="400" height="240"><span class="__P__topic">Reliability</span><h2>Chaos days: breaking things on purpose</h2><p>A playbook for game days that teams actually look forward to.</p><small data-date>—</small></article>
+    </section>
+
+    <section class="__P__topics" id="topics">
+      <h3>Topics</h3>
+      <div><a href="#latest">Networking</a><a href="#latest">Databases</a><a href="#latest">Observability</a><a href="#latest">Security</a><a href="#latest">Frontend</a><a href="#latest">Culture</a></div>
+    </section>
+
+    <section class="__P__about" id="about">
+      <p>Written by the engineers who build and run __BRAND__. Opinions are our own; outages are, unfortunately, also our own.</p>
+      <p class="__P__rss">RSS: https://__DOMAIN__/feed.xml</p>
+    </section>
+  </main>
+
+  <footer class="__P__footer">© __YEAR__ __BRAND__ · Engineering blog · build __BUILD__</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

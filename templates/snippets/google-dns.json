@@ -1,1 +1,0 @@
-{"id":"google-dns","name":"Google DNS","type":"dns","version":1,"enabled":false,"managedBy":"remnanode-manager","requires":[],"config":{"dns":{"servers":["8.8.8.8","8.8.4.4"]}}}
