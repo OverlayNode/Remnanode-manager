@@ -395,7 +395,7 @@ hy2_diagnose() {
   # 6. Ошибки Xray про hysteria/QUIC/TLS.
   local log_errors=""
   if node_running; then
-    log_errors="$(docker logs --since 24h remnanode 2>&1 | grep -iE 'hysteria|quic|certificate|tls:' | grep -iE 'fail|error|invalid|denied' | tail -n 5 || true)"
+    log_errors="$(docker logs --since 24h remnanode 2>&1 | grep -aiE 'hysteria|quic|certificate|tls:' | grep -aiE 'fail|error|invalid|denied' | tail -n 5 || true)"
   fi
   if ! node_running; then
     :
@@ -427,6 +427,12 @@ hy2_diagnose() {
     warn "7. Panel API не настроен — проверь вручную, что профиль с HYSTERIA2 назначен ноде."
   fi
 
+  # 8. Доходят ли пакеты клиента до ноды вообще.
+  echo
+  if confirm_no_default "8. Послушать входящий UDP ${port} 20 секунд, пока ты подключаешься клиентом?"; then
+    hy2_capture "$port"
+  fi
+
   echo
   echo "Что проверить в Panel и у клиента:"
   echo "  • Hosts: есть хост для inbound'а HYSTERIA2, адрес ${DOMAIN}, порт ${port}, SNI ${DOMAIN};"
@@ -443,6 +449,32 @@ hy2_diagnose() {
     ok "На стороне ноды проблем не найдено."
   else
     warn "Найдено проблем на ноде: ${problems}."
+  fi
+}
+
+# Показывает, доходят ли UDP-пакеты клиентов до ноды. Нет пакетов — UDP режется
+# до сервера (ТСПУ или firewall хостера); пакеты есть — проблема в клиенте/Panel.
+hy2_capture() {
+  local port="$1" file count sources
+  command -v tcpdump >/dev/null 2>&1 || {
+    export DEBIAN_FRONTEND=noninteractive
+    apt_get_wait install -y tcpdump >/dev/null || die "Не удалось установить tcpdump."
+  }
+  file="$(mktemp)"
+  info "Подключись клиентом к Hysteria2 сейчас. Жду входящие пакеты на UDP ${port} (20 с)..."
+  timeout 20 tcpdump -nn -i any -l -c 200 "udp and dst port ${port}" > "$file" 2>/dev/null || true
+  count="$(grep -c ' IP6\? ' "$file" || true)"
+  sources="$(awk '{for (i = 1; i <= NF; i++) if ($i == ">") {print $(i - 1); break}}' "$file" \
+    | sed -E 's/\.[0-9]+$//' | sort | uniq -c | sort -rn | head -n 5)"
+  rm -f "$file"
+  if ((count == 0)); then
+    err "Ни одного UDP-пакета на ${port} за 20 с. Трафик клиента не доходит до ноды:"
+    err "  либо firewall хостера (security group) не пропускает UDP ${port},"
+    err "  либо ТСПУ режет QUIC к этому IP — включи Salamander (пункт 10) и повтори."
+  else
+    ok "Получено пакетов: ${count}. Источники:"
+    printf '%s\n' "$sources" | sed 's/^/   /'
+    echo "   Пакеты доходят — проверь Host и Internal Squad в Panel, пароль Salamander у Host и версию клиента."
   fi
 }
 
