@@ -1,5 +1,5 @@
 {
   "name": "net-diagnostics",
   "title": "Network Check",
-  "description": "Тёмный инструмент проверки задержки до сервера: реальные замеры ping/jitter"
+  "description": "Проверка задержки сети"
 }

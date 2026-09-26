@@ -1,5 +1,5 @@
 {
   "name": "file-transfer",
   "title": "File Transfer",
-  "description": "Сервис передачи больших файлов: drop-зона, прогресс загрузки, тарифы"
+  "description": "Передача больших файлов"
 }

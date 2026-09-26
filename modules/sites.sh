@@ -54,13 +54,11 @@ templates_names() {
   done
 }
 
+# Короткое описание шаблона из manifest.json (пусто, если его нет).
 template_title() {
   local manifest="$1/manifest.json"
-  if [[ -f "$manifest" ]] && command -v jq >/dev/null 2>&1; then
-    jq -r '"\(.title) — \(.description)"' "$manifest" 2>/dev/null
-  else
-    basename "$1"
-  fi
+  [[ -f "$manifest" ]] && command -v jq >/dev/null 2>&1 || return 0
+  jq -r '.description // empty' "$manifest" 2>/dev/null || true
 }
 
 random_brand() {
@@ -235,10 +233,11 @@ select_template() {
   ((${#names[@]} > 0)) || die "Каталог шаблонов пуст: ${dir}"
 
   echo >&2
-  echo -e "${C_BOLD}Шаблоны сайтов-заглушек${C_RESET} (скриншоты: https://github.com/${RNM_REPO}/tree/${RNM_REF}/templates/sites)" >&2
+  echo -e "${C_BOLD}Шаблоны сайтов-заглушек${C_RESET}" >&2
+  echo "Скриншоты: https://github.com/${RNM_REPO}/tree/${RNM_REF}/templates/sites" >&2
   echo >&2
   for index in "${!names[@]}"; do
-    printf '%3d. %-18s %s\n' "$((index + 1))" "${names[$index]}" "$(template_title "${dir}/${names[$index]}" | cut -d'—' -f2- | cut -c1-58)" >&2
+    printf '%3d. %-17s %s\n' "$((index + 1))" "${names[$index]}" "$(template_title "${dir}/${names[$index]}")" >&2
   done
   echo >&2
   echo "  r. Случайный шаблон" >&2
