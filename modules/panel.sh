@@ -2,7 +2,7 @@
 # RemnaNode Manager — модуль: Remnawave Panel API: Config Profiles с diff и backup.
 # Загружается ядром install.sh через load_module; отдельно не запускается.
 # shellcheck disable=SC2034
-RNM_MODULE_VERSION="4.1.0"
+RNM_MODULE_VERSION="4.2.0"
 
 panel_configure() {
   local url token old_umask

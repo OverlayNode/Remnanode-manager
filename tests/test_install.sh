@@ -78,6 +78,25 @@ assert_fail bash -c 'source "$1"; load_module "../evil"' _ "${PROJECT_DIR}/insta
 assert_ok grep -q 'zapret2' "${PROJECT_DIR}/modules/zapret.sh"
 assert_fail grep -qE 'bol-van/zapret[^2]' "${PROJECT_DIR}/modules/zapret.sh"
 
+# Каждый вызов функции модуля из меню ссылается на функцию этого модуля
+# (иначе в меню — «команда не найдена», код 127).
+while read -r module fn; do
+  grep -q "^${fn}() {" "${PROJECT_DIR}/modules/${module}.sh" \
+    || { printf 'FAIL: %s() не найдена в modules/%s.sh\n' "$fn" "$module" >&2; FAILURES=$((FAILURES + 1)); }
+done < <(grep -hoE '(with_module|open_module_menu) [a-z0-9-]+ [a-z_0-9]+' "${PROJECT_DIR}/install.sh" "${PROJECT_DIR}"/modules/*.sh \
+  | awk '{print $2, $3}' | sort -u)
+
+# Ядро, запущенное не как установленная команда, не берёт модули из
+# /usr/local/lib/remnanode — только из своего каталога или свежей загрузки.
+fake_lib="${TEST_DIR}/lib-modules"
+mkdir -p "$fake_lib"
+printf 'RNM_MODULE_VERSION="%s"\nstale_marker() { :; }\n' "$SCRIPT_VERSION" > "${fake_lib}/warp.sh"
+assert_eq "${PROJECT_DIR}/modules/warp.sh" "$(RNM_LIB_DIR="$fake_lib" module_path warp)" "clone modules win"
+assert_fail bash -c 'source "$1"; SCRIPT_DIR=/dev/fd; RNM_LIB_DIR="$2"; RUNTIME_CACHE="$3"; curl() { return 7; }; module_path warp' \
+  _ "${PROJECT_DIR}/install.sh" "$fake_lib" "${TEST_DIR}/run"
+assert_eq "${fake_lib}/warp.sh" "$(bash -c 'source "$1"; SCRIPT_DIR=/usr/local/bin; RNM_LIB_DIR="$2"; module_path warp' _ "${PROJECT_DIR}/install.sh" "$fake_lib")" \
+  "installed command uses its own modules"
+
 # --- DNS ---------------------------------------------------------------------
 assert_ok validate_dns_list "77.88.8.8,77.88.8.1"
 assert_ok validate_dns_list "https://1.1.1.1/dns-query,https://8.8.8.8/dns-query"
@@ -94,7 +113,7 @@ INSTALL_MODE=basic
 EOF
 
 load_state
-assert_eq "4.1.0" "$SCRIPT_VERSION" "running version wins over state"
+assert_eq "4.2.0" "$SCRIPT_VERSION" "running version wins over state"
 assert_eq "basic" "$INSTALL_MODE" "install mode loaded"
 assert_eq "remnawave/node:latest" "$NODE_IMAGE" "default node image"
 

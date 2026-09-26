@@ -7,7 +7,7 @@
   <circle cx="64" cy="19" r="6" fill="#27c93f"/>
   <text x="440" y="24" fill="#8b949e" font-size="13" text-anchor="middle">root@node-fra-1: ~</text>
 
-  <text x="28" y="72"><tspan fill="#39c5cf" font-weight="700">RemnaNode Manager</tspan><tspan fill="#6e7681"> v4.1.0   node-fra-1 · selfsteal</tspan></text>
+  <text x="28" y="72"><tspan fill="#39c5cf" font-weight="700">RemnaNode Manager</tspan><tspan fill="#6e7681"> v4.2.0   node-fra-1 · selfsteal</tspan></text>
   <text x="28" y="94" fill="#30363d">────────────────────────────────────────────────────────────────────────────────</text>
 
   <text x="28" y="124"><tspan fill="#3fb950">●</tspan><tspan fill="#c9d1d9"> Node        </tspan><tspan fill="#3fb950">ONLINE        </tspan><tspan fill="#c9d1d9">Ver: 2.1.3</tspan></text>

@@ -2,7 +2,7 @@
 # RemnaNode Manager — модуль: routing: geo-файлы roscomvpn, DNS, политика РФ-трафика, клиентская маршрутизация.
 # Загружается ядром install.sh через load_module; отдельно не запускается.
 # shellcheck disable=SC2034
-RNM_MODULE_VERSION="4.1.0"
+RNM_MODULE_VERSION="4.2.0"
 
 show_client_routing() {
   load_state

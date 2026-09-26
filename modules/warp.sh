@@ -2,7 +2,7 @@
 # RemnaNode Manager — модуль: WARP (Chara-Freedom/vps-warp): WireGuard-интерфейс warp без смены default route.
 # Загружается ядром install.sh через load_module; отдельно не запускается.
 # shellcheck disable=SC2034
-RNM_MODULE_VERSION="4.1.0"
+RNM_MODULE_VERSION="4.2.0"
 
 warp_installed() {
   [[ -f /etc/wireguard/warp.conf ]]

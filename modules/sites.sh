@@ -2,7 +2,7 @@
 # RemnaNode Manager — модуль: сайты-заглушки: каталог шаблонов и уникализация при каждом деплое.
 # Загружается ядром install.sh через load_module; отдельно не запускается.
 # shellcheck disable=SC2034
-RNM_MODULE_VERSION="4.1.0"
+RNM_MODULE_VERSION="4.2.0"
 
 # Каталог шаблонов: локальный (если скрипт запущен из клона) или кеш из GitHub.
 templates_dir() {

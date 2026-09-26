@@ -2,7 +2,7 @@
 # RemnaNode Manager — модуль: мониторинг: live-монитор, ресурсы, порты, логи, диагностика.
 # Загружается ядром install.sh через load_module; отдельно не запускается.
 # shellcheck disable=SC2034
-RNM_MODULE_VERSION="4.1.0"
+RNM_MODULE_VERSION="4.2.0"
 
 live_monitor() {
   local key=""

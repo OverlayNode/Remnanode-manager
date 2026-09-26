@@ -18,13 +18,14 @@ set -Eeuo pipefail
 #
 # Запускать от root. Поддерживаются Ubuntu и Debian.
 
-SCRIPT_VERSION="4.1.0"
+SCRIPT_VERSION="4.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
 APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-600}"
 
 RNM_REPO="${RNM_REPO:-OverlayNode/Remnanode-manager}"
 RNM_REF="${RNM_REF:-main}"
 RNM_RAW_URL="https://raw.githubusercontent.com/${RNM_REPO}/${RNM_REF}"
+RNM_COMMAND_PATH="/usr/local/bin/remnanode"
 RNM_LIB_DIR="/usr/local/lib/remnanode/modules"
 # shellcheck disable=SC2034 # используется модулем admin и тестами
 RNM_MODULES="sites routing panel warp psiphon tor zapret monitor admin"
@@ -2987,9 +2988,23 @@ module_version_ok() {
   grep -qx "RNM_MODULE_VERSION=\"${SCRIPT_VERSION}\"" "$1" 2>/dev/null
 }
 
+# Кеш скачанных модулей живёт один запуск скрипта: при каждом запуске через
+# curl модули скачиваются заново и соответствуют текущему main, даже если
+# версия не менялась. Подоболочки run_action наследуют ID сессии.
+RNM_SESSION="${RNM_SESSION:-$$}"
+
+module_cache_cleanup() {
+  [[ -d "${RUNTIME_CACHE}/modules" ]] || return 0
+  find "${RUNTIME_CACHE}/modules" -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+}
+
 module_path() {
   local name="$1" dir file cache_dir tmp
-  for dir in "${SCRIPT_DIR}/modules" "$RNM_LIB_DIR"; do
+  local -a dirs=("${SCRIPT_DIR}/modules")
+  # Модули установленной команды — только для неё самой: ядро, запущенное
+  # через curl, не должно подхватывать устаревшие модули той же версии.
+  [[ "$SCRIPT_DIR" == "$(dirname "$RNM_COMMAND_PATH")" ]] && dirs+=("$RNM_LIB_DIR")
+  for dir in "${dirs[@]}"; do
     file="${dir}/${name}.sh"
     if [[ -f "$file" ]] && module_version_ok "$file"; then
       printf '%s' "$file"
@@ -2997,7 +3012,7 @@ module_path() {
     fi
   done
 
-  cache_dir="${RUNTIME_CACHE}/modules/${SCRIPT_VERSION}"
+  cache_dir="${RUNTIME_CACHE}/modules/session-${RNM_SESSION}"
   file="${cache_dir}/${name}.sh"
   if [[ -f "$file" ]] && module_version_ok "$file"; then
     printf '%s' "$file"
@@ -3486,6 +3501,7 @@ main_menu() {
   touch "$INSTALL_LOG" 2>/dev/null || true
   chmod 600 "$INSTALL_LOG" 2>/dev/null || true
   mkdir -p "$RUNTIME_CACHE" 2>/dev/null || true
+  module_cache_cleanup
 
   while true; do
     show_menu

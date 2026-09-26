@@ -2,7 +2,7 @@
 # RemnaNode Manager — модуль: администрирование сервера и бэкапы.
 # Загружается ядром install.sh через load_module; отдельно не запускается.
 # shellcheck disable=SC2034
-RNM_MODULE_VERSION="4.1.0"
+RNM_MODULE_VERSION="4.2.0"
 
 docker_cleanup() {
   docker_available || die "Docker недоступен."
@@ -146,7 +146,7 @@ system_upgrade() {
 }
 
 install_command() {
-  local target="/usr/local/bin/remnanode" tmp_dir name file new_version from_clone=0
+  local target="$RNM_COMMAND_PATH" tmp_dir name file new_version from_clone=0
   tmp_dir="$(mktemp -d)"
   # Локальная копия — только при запуске из клона репозитория; иначе (в том
   # числе из уже установленной команды) скачиваем свежую версию.
