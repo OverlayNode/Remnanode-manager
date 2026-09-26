@@ -223,6 +223,20 @@ assert_fail jq -e '.rules[] | select(.outboundTag == "dns-out")' <<<"$(build_rou
 DNS_HIJACK=1
 GEO_ENABLED=1
 
+# Hysteria2: BBR всегда, Salamander — только с паролем; JSON для Host в Panel.
+DOMAIN=node.example.com RAW_ENABLED=0 XHTTP_ENABLED=0 HY2_ENABLED=1 HY2_PORT=443
+HY2_OBFS_PASSWORD=""
+hy2="$(build_inbounds_json)"
+assert_ok jq -e '.[0].protocol == "hysteria" and .[0].streamSettings.network == "hysteria" and .[0].streamSettings.security == "tls"' <<<"$hy2"
+assert_ok jq -e '.[0].streamSettings.finalmask == {quicParams: {debug: false, congestion: "bbr"}}' <<<"$hy2"
+assert_eq "" "$(hy2_host_finalmask_json)" "no host finalmask without obfs"
+HY2_OBFS_PASSWORD="abc123"
+hy2="$(build_inbounds_json)"
+assert_ok jq -e '.[0].streamSettings.finalmask.udp == [{type: "salamander", settings: {password: "abc123"}}]' <<<"$hy2"
+assert_ok jq -e '.[0].streamSettings.finalmask.quicParams.congestion == "bbr"' <<<"$hy2"
+assert_eq '{"udp":[{"type":"salamander","settings":{"password":"abc123"}}]}' "$(hy2_host_finalmask_json | tr -d '')" "host finalmask json"
+HY2_OBFS_PASSWORD="" HY2_ENABLED=0 DOMAIN=""
+
 # --- Генерация профиля (basic: без inbound'ов) --------------------------------
 PROFILE_DIR="${TEST_DIR}/profiles"
 PROFILE_FILE="${PROFILE_DIR}/xray-profile.json"

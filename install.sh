@@ -104,6 +104,7 @@ XHTTP_PATH=""
 
 HY2_ENABLED="0"
 HY2_PORT="443"
+HY2_OBFS_PASSWORD=""     # Salamander: пусто = обфускация выключена
 
 # Routing.
 GEO_ENABLED="0"
@@ -353,6 +354,7 @@ save_state() {
 
     printf 'HY2_ENABLED=%q\n' "$HY2_ENABLED"
     printf 'HY2_PORT=%q\n' "$HY2_PORT"
+    printf 'HY2_OBFS_PASSWORD=%q\n' "$HY2_OBFS_PASSWORD"
 
     printf 'GEO_ENABLED=%q\n' "$GEO_ENABLED"
     printf 'RU_POLICY=%q\n' "$RU_POLICY"
@@ -1562,6 +1564,16 @@ prompt_inbounds() {
 
   if [[ "$HY2_ENABLED" == "1" ]]; then
     HY2_PORT="$(prompt_port "UDP порт Hysteria2" "443")"
+
+    echo
+    echo "Обфускация Salamander маскирует Hysteria2 под случайный UDP вместо QUIC/HTTP3."
+    echo "Нужна, если клиенты подключаются из РФ: ТСПУ режет QUIC на UDP 443 к зарубежным IP."
+    echo "Пароль обфускации нужно будет вставить в Host этой ноды в Panel (поле Final mask)."
+    if confirm "Включить Salamander?"; then
+      [[ -n "$HY2_OBFS_PASSWORD" ]] || HY2_OBFS_PASSWORD="$(openssl rand -hex 16)"
+    else
+      HY2_OBFS_PASSWORD=""
+    fi
   fi
 
   if [[ "$RAW_ENABLED" != "1" && "$XHTTP_ENABLED" != "1" ]]; then
@@ -1813,6 +1825,20 @@ edit_routing_list() {
 # Генерация Xray Config Profile
 # ---------------------------------------------------------------------------
 
+# finalmask для Hysteria2 на ноде: BBR и, если задан пароль, Salamander.
+hy2_finalmask_json() {
+  jq -cn --arg password "$HY2_OBFS_PASSWORD" '
+    {quicParams: {debug: false, congestion: "bbr"}}
+    + (if $password == "" then {} else {udp: [{type: "salamander", settings: {password: $password}}]} end)'
+}
+
+# JSON для поля Final mask у Host в Panel — из него Remnawave добавляет
+# obfs=salamander в ссылку hysteria2:// для клиентов.
+hy2_host_finalmask_json() {
+  [[ -n "$HY2_OBFS_PASSWORD" ]] || return 0
+  jq -cn --arg password "$HY2_OBFS_PASSWORD" '{udp: [{type: "salamander", settings: {password: $password}}]}'
+}
+
 build_inbounds_json() {
   local result='[]'
 
@@ -1883,6 +1909,7 @@ build_inbounds_json() {
     result="$(jq -c \
       --argjson port "$HY2_PORT" \
       --arg domain "$DOMAIN" \
+      --argjson finalmask "$(hy2_finalmask_json)" \
       '. + [{
         tag: "HYSTERIA2",
         port: $port,
@@ -1892,7 +1919,7 @@ build_inbounds_json() {
         streamSettings: {
           network: "hysteria",
           security: "tls",
-          finalmask: {quicParams: {debug: false, congestion: "bbr"}},
+          finalmask: $finalmask,
           tlsSettings: {
             alpn: ["h3"],
             serverName: $domain,
@@ -2159,6 +2186,13 @@ generate_xray_profile() {
       echo "UDP port: ${HY2_PORT}"
       echo "SNI: ${DOMAIN}"
       echo "TLS certificate: /opt/remnanode/ssl/fullchain.pem"
+      if [[ -n "$HY2_OBFS_PASSWORD" ]]; then
+        echo "Obfuscation: salamander"
+        echo "Panel → Hosts → хост HYSTERIA2 → Final mask (без этого клиенты не подключатся):"
+        echo "  $(hy2_host_finalmask_json)"
+      else
+        echo "Obfuscation: нет (при подключении из РФ QUIC на UDP может блокироваться)"
+      fi
       echo
     fi
 
@@ -3397,6 +3431,8 @@ profile_menu() {
     echo "6. Отправить профиль в Panel"
     echo "7. Сгенерировать новую Reality keypair"
     echo "8. Сгенерировать новые Short IDs"
+    echo "9. Проверить Hysteria2"
+    echo "10. Hysteria2: обфускация Salamander вкл/выкл"
     echo
     echo "0. Назад"
     echo
@@ -3411,6 +3447,8 @@ profile_menu() {
       6) run_action with_module panel panel_push_profile; pause ;;
       7) run_action rotate_reality_keys; pause ;;
       8) run_action regenerate_short_ids; pause ;;
+      9) run_action with_module monitor hy2_diagnose; pause ;;
+      10) run_action with_module monitor hy2_toggle_obfs; pause ;;
       0) return 0 ;;
       *) ;;
     esac

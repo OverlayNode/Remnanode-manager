@@ -315,3 +315,155 @@ diagnostics() {
 
   echo
 }
+
+# Пошаговая проверка Hysteria2 на ноде: где именно обрывается цепочка.
+hy2_diagnose() {
+  load_state
+  local problems=0 port="$HY2_PORT" cert="${BASE_DIR}/ssl/fullchain.pem" line
+
+  echo -e "${C_BOLD}Проверка Hysteria2${C_RESET} (UDP ${port}, SNI ${DOMAIN:-—})"
+  echo
+
+  if [[ "$HY2_ENABLED" != "1" ]]; then
+    err "Hysteria2 не выбран в inbound'ах этой ноды (меню «Xray profile» → «Настроить inbound'ы заново»)."
+    return 1
+  fi
+
+  # 1. Профиль.
+  if [[ -f "$PROFILE_FILE" ]] && jq -e '.inbounds[] | select(.tag == "HYSTERIA2")' "$PROFILE_FILE" >/dev/null 2>&1; then
+    ok "1. Inbound HYSTERIA2 есть в сгенерированном профиле."
+  else
+    err "1. В ${PROFILE_FILE} нет inbound'а HYSTERIA2 — пересобери профиль."
+    problems=$((problems + 1))
+  fi
+
+  # 2. Xray на ноде реально слушает UDP-порт — значит, Panel прислала профиль с inbound'ом.
+  line="$(ss -Hlnup "( sport = :${port} )" 2>/dev/null | head -n1)"
+  if [[ "$line" == *xray* || "$line" == *rw-core* ]]; then
+    ok "2. Xray слушает UDP ${port}."
+  elif [[ -n "$line" ]]; then
+    err "2. UDP ${port} занят другим процессом: ${line}"
+    problems=$((problems + 1))
+  else
+    err "2. Никто не слушает UDP ${port}. Профиль с HYSTERIA2 не применён к ноде в Panel,"
+    err "   либо Xray не смог поднять inbound (см. пункт 6)."
+    problems=$((problems + 1))
+  fi
+
+  # 3. Firewall.
+  if ! command -v ufw >/dev/null 2>&1 || ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+    warn "3. UFW не активен — проверь только firewall провайдера."
+  elif ufw status 2>/dev/null | grep -Eq "^${port}/udp[[:space:]]+ALLOW|^${port}[[:space:]]+ALLOW"; then
+    ok "3. UFW разрешает ${port}/udp."
+  else
+    err "3. UFW не пропускает ${port}/udp. Исправить: ufw allow ${port}/udp"
+    problems=$((problems + 1))
+  fi
+  warn "   Firewall/security group провайдера тоже должен пропускать ${port}/UDP — из скрипта это не проверить."
+
+  # 4. Сертификат.
+  if [[ ! -r "$cert" ]]; then
+    err "4. Нет сертификата ${cert}."
+    problems=$((problems + 1))
+  else
+    local days san
+    days="$(cert_days_left 2>/dev/null || echo -1)"
+    san="$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/.*DNS://p' | tr '\n' ' ')"
+    if ((days < 0)); then
+      err "4. Сертификат истёк — продли в меню «Домен и SSL»."
+      problems=$((problems + 1))
+    elif [[ " ${san} " != *" ${DOMAIN} "* ]]; then
+      err "4. Сертификат выписан на «${san}», а не на ${DOMAIN}."
+      problems=$((problems + 1))
+    else
+      ok "4. Сертификат для ${DOMAIN}, осталось ${days} дн."
+    fi
+  fi
+
+  # 5. Контейнер видит ключ и сертификат по пути из профиля.
+  if ! node_running; then
+    err "5–6. Контейнер remnanode не запущен — проверить доступ к сертификату и логи нельзя."
+    problems=$((problems + 1))
+  elif docker exec remnanode test -r /opt/remnanode/ssl/privkey.pem 2>/dev/null \
+    && docker exec remnanode test -r /opt/remnanode/ssl/fullchain.pem 2>/dev/null; then
+    ok "5. Контейнер remnanode читает /opt/remnanode/ssl/*.pem."
+  else
+    err "5. Контейнер remnanode не видит /opt/remnanode/ssl — нужен volume /opt/remnanode/ssl:/opt/remnanode/ssl:ro."
+    problems=$((problems + 1))
+  fi
+
+  # 6. Ошибки Xray про hysteria/QUIC/TLS.
+  local log_errors=""
+  if node_running; then
+    log_errors="$(docker logs --since 24h remnanode 2>&1 | grep -iE 'hysteria|quic|certificate|tls:' | grep -iE 'fail|error|invalid|denied' | tail -n 5 || true)"
+  fi
+  if ! node_running; then
+    :
+  elif [[ -n "$log_errors" ]]; then
+    err "6. В логах ноды есть ошибки:"
+    printf '%s\n' "$log_errors" | sed 's/^/   /'
+    problems=$((problems + 1))
+  else
+    ok "6. Ошибок hysteria/QUIC/TLS в логах ноды за сутки нет."
+  fi
+
+  # 7. Профиль в Panel (если есть API-токен).
+  if panel_configured && [[ -n "$PANEL_PROFILE_UUID" ]]; then
+    local remote
+    remote="$( (panel_request GET "/api/config-profiles/${PANEL_PROFILE_UUID}") 2>/dev/null || true)"
+    if jq -e '.response.config.inbounds[] | select(.protocol == "hysteria")' <<<"$remote" >/dev/null 2>&1; then
+      ok "7. В Config Profile панели есть inbound hysteria."
+      if [[ -n "$HY2_OBFS_PASSWORD" ]] && ! jq -e --arg p "$HY2_OBFS_PASSWORD" \
+        '.response.config.inbounds[] | select(.protocol == "hysteria") | .streamSettings.finalmask.udp[]? | select(.settings.password == $p)' \
+        <<<"$remote" >/dev/null 2>&1; then
+        err "   В панели другой пароль Salamander или его нет — отправь профиль заново."
+        problems=$((problems + 1))
+      fi
+    else
+      err "7. В Config Profile панели нет inbound'а hysteria — отправь профиль (меню «Remnawave Panel API»)."
+      problems=$((problems + 1))
+    fi
+  else
+    warn "7. Panel API не настроен — проверь вручную, что профиль с HYSTERIA2 назначен ноде."
+  fi
+
+  echo
+  echo "Что проверить в Panel и у клиента:"
+  echo "  • Hosts: есть хост для inbound'а HYSTERIA2, адрес ${DOMAIN}, порт ${port}, SNI ${DOMAIN};"
+  if [[ -n "$HY2_OBFS_PASSWORD" ]]; then
+    echo "  • у этого хоста в Final mask: $(hy2_host_finalmask_json)"
+    echo "    (без него ссылка hysteria2:// будет без obfs, и клиент не подключится);"
+  else
+    echo "  • при подключении из РФ QUIC на UDP ${port} часто режется ТСПУ — включи Salamander;"
+  fi
+  echo "  • inbound HYSTERIA2 включён в Internal Squad пользователя;"
+  echo "  • клиент поддерживает Hysteria2 (Happ, v2rayN, Hiddify, NekoBox; ядро Xray ≥ 26 или sing-box)."
+  echo
+  if ((problems == 0)); then
+    ok "На стороне ноды проблем не найдено."
+  else
+    warn "Найдено проблем на ноде: ${problems}."
+  fi
+}
+
+# Включает/выключает Salamander без повторного выбора протоколов.
+hy2_toggle_obfs() {
+  load_state
+  [[ "$HY2_ENABLED" == "1" ]] || die "Hysteria2 не включён."
+  if [[ -n "$HY2_OBFS_PASSWORD" ]]; then
+    confirm_no_default "Выключить Salamander? Клиентам со старой ссылкой нужно обновить подписку." || return 0
+    HY2_OBFS_PASSWORD=""
+  else
+    HY2_OBFS_PASSWORD="$(openssl rand -hex 16)"
+  fi
+  save_state
+  generate_xray_profile 1
+  echo
+  if [[ -n "$HY2_OBFS_PASSWORD" ]]; then
+    ok "Salamander включён. Вставь в Panel → Hosts → хост HYSTERIA2 → Final mask:"
+    echo "  $(hy2_host_finalmask_json)"
+  else
+    ok "Salamander выключен. Очисти поле Final mask у хоста HYSTERIA2 в Panel."
+  fi
+  warn "Отправь обновлённый профиль в Panel."
+}

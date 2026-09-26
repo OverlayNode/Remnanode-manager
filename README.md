@@ -107,7 +107,21 @@ sudo ./install.sh
 | 2 | VLESS XHTTP + REALITY | `8443/tcp` (или `443`, если RAW не выбран) | Reality → собственный Selfsteal-сайт, случайный path |
 | 3 | Hysteria2 | `443/udp` | TLS-сертификат домена ноды |
 
-TCP и UDP `443` используются одновременно без конфликта. Flow `xtls-rprx-vision` назначается пользователям в Panel только для RAW, не для XHTTP. Ноде без Selfsteal (пункт 1) inbound'ы задаются в Panel: для Reality и Hysteria2 нужны домен и сертификат, которые настраивает Selfsteal.
+TCP и UDP `443` используются одновременно без конфликта.
+
+#### Hysteria2 и обфускация Salamander
+
+При подключении из РФ ТСПУ режет или замедляет QUIC/HTTP3 на UDP 443 к зарубежным IP, а Hysteria2 по умолчанию выглядит именно как QUIC. При выборе Hysteria2 скрипт предлагает включить **Salamander** — обфускацию, после которой трафик выглядит как случайный UDP.
+
+Remnawave берёт параметры обфускации для ссылки `hysteria2://` не из inbound'а, а из настроек Host, поэтому после включения нужно **вставить выведенный скриптом JSON в Panel → Hosts → хост HYSTERIA2 → Final mask**, например:
+
+```json
+{"udp":[{"type":"salamander","settings":{"password":"<пароль из profile-info>"}}]}
+```
+
+Без этого клиент получит ссылку без `obfs` и не подключится. Включить или выключить Salamander позже: меню «Xray profile» → «Hysteria2: обфускация Salamander».
+
+Если Hysteria2 не подключается — меню «Xray profile» → «Проверить Hysteria2». Проверка по шагам покажет, где обрыв: inbound в профиле, Xray слушает UDP-порт (то есть Panel применила профиль), UFW, сертификат и его домен, доступ контейнера к ключу, ошибки в логах ноды, профиль и пароль обфускации в Panel. Firewall провайдера (security group) должен отдельно пропускать UDP-порт. Flow `xtls-rprx-vision` назначается пользователям в Panel только для RAW, не для XHTTP. Ноде без Selfsteal (пункт 1) inbound'ы задаются в Panel: для Reality и Hysteria2 нужны домен и сертификат, которые настраивает Selfsteal.
 
 ### Версия Node
 
